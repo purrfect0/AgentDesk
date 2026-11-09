@@ -64,7 +64,6 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-      - uses: android-actions/setup-android@v3
       - name: Win98 look (98.css + icons)
         run: node scripts/fetch-assets.js
       - name: Capacitor project
