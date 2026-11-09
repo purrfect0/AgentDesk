@@ -1,0 +1,4 @@
+node_modules/
+dist/
+web/vendor/
+web/icons/

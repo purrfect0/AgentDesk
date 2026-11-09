@@ -1,0 +1,118 @@
+# Builds the Agent Desk installers: Windows (.exe, Electron) and Android (.apk, Capacitor).
+# Artifacts: Actions -> run -> "AgentDesk-Windows" / "AgentDesk-Android".
+# A tag like agent-desk-v2.0.0 also publishes them as a GitHub Release.
+name: Agent Desk
+
+on:
+  push:
+    branches: [main]
+    tags: ["agent-desk-v*"]
+    paths: ["agent-desk/**", ".github/workflows/agent-desk.yml"]
+  pull_request:
+    paths: ["agent-desk/**", ".github/workflows/agent-desk.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: agent-desk
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Core tests
+        run: node --test --test-reporter=spec core/test/desk.test.js
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Win98 look (98.css + icons)
+        run: node scripts/fetch-assets.js
+      - name: Install Electron
+        run: npm install --no-audit --no-fund
+      - name: Build installer
+        run: npx electron-builder --win nsis --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AgentDesk-Windows
+          path: agent-desk/dist/*.exe
+          if-no-files-found: error
+
+  android:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+      - name: Win98 look (98.css + icons)
+        run: node scripts/fetch-assets.js
+      - name: Capacitor project
+        working-directory: agent-desk/mobile
+        run: |
+          npm install --no-audit --no-fund
+          npm run web
+          npx cap add android
+          npx capacitor-assets generate --android || echo "::warning::app icons were not generated, the default icon is used"
+          node scripts/patch-android.js
+          npx cap sync android
+      - name: Same signature for every build (optional secret ANDROID_DEBUG_KEYSTORE)
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_DEBUG_KEYSTORE }}
+        run: |
+          if [ -n "$KEYSTORE" ]; then
+            mkdir -p ~/.android
+            echo "$KEYSTORE" | base64 -d > ~/.android/debug.keystore
+            echo "keystore from secret"
+          else
+            echo "::warning::ANDROID_DEBUG_KEYSTORE is not set: each build is signed with a new key, updating needs uninstall first"
+          fi
+      - name: Build APK
+        working-directory: agent-desk/mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+      - name: Name the APK
+        run: |
+          v=$(node -p "require('./mobile/package.json').version")
+          mkdir -p dist
+          cp mobile/android/app/build/outputs/apk/debug/app-debug.apk "dist/AgentDesk-$v.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AgentDesk-Android
+          path: agent-desk/dist/*.apk
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/agent-desk-v')
+    needs: [windows, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Agent Desk ${{ github.ref_name }}
+          files: out/*

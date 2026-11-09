@@ -1,0 +1,22 @@
+{
+  "name": "agent-desk-mobile",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Agent Desk для Android: те же агенты и напоминания, что на ПК, по Wi-Fi",
+  "scripts": {
+    "web": "node ../scripts/prepare-mobile.js",
+    "android:add": "cap add android",
+    "android:icons": "capacitor-assets generate --android",
+    "android:patch": "node scripts/patch-android.js",
+    "android:sync": "cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/local-notifications": "^7.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^7.0.0"
+  }
+}

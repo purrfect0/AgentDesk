@@ -1,0 +1,61 @@
+{
+  "name": "agent-desk",
+  "productName": "Agent Desk",
+  "version": "2.0.0",
+  "description": "Кто из ИИ-агентов работает, кто ждёт ответа и что нужно переслать",
+  "author": "jayleywesa",
+  "license": "MIT",
+  "private": true,
+  "main": "desktop/main.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test --test-reporter=spec core/test/desk.test.js",
+    "assets": "node scripts/fetch-assets.js",
+    "start": "electron .",
+    "dist:win": "electron-builder --win nsis --x64 --publish never",
+    "mobile:web": "node scripts/prepare-mobile.js"
+  },
+  "devDependencies": {
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "app.agentdesk.desktop",
+    "productName": "Agent Desk",
+    "copyright": "Agent Desk",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "package.json",
+      "core/desk.js",
+      "desktop/**",
+      "web/**",
+      "!web/**/*.md"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "desktop/icon.ico",
+      "artifactName": "AgentDesk-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Agent Desk",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "installerLanguages": [
+        "ru_RU"
+      ],
+      "language": "1049"
+    }
+  }
+}

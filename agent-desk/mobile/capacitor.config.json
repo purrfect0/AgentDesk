@@ -1,0 +1,17 @@
+{
+  "appId": "app.agentdesk.mobile",
+  "appName": "Agent Desk",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "http"
+  },
+  "android": {
+    "allowMixedContent": true,
+    "backgroundColor": "#008080"
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "iconColor": "#000080"
+    }
+  }
+}
