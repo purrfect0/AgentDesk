@@ -44,8 +44,9 @@ fetch(`/api/alert?id=${encodeURIComponent(q.get("id") || "")}`).then((r) => r.js
   document.getElementById("caption").textContent = `Agent Desk — ${a.project}`;
   document.getElementById("title").textContent = a.title;
   document.getElementById("title").title = a.title;
-  document.getElementById("body").textContent = a.body;
-  document.getElementById("icon").src = `icons/${ICON[a.kind] || "msg_information-0"}.png`;
+  // What to do first, then the task itself.
+  document.getElementById("body").textContent = [a.action, a.body].filter(Boolean).join(" · ");
+  document.getElementById("icon").src = `icons/${a.icon || ICON[a.kind] || "msg_information-0"}.png`;
 }).catch(() => {});
 
 if (q.get("sound") === "1") chime(Number(q.get("volume") ?? 80));

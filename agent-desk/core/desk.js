@@ -270,6 +270,12 @@ function nameMap(value, valueIsList) {
 
 // --- desk -------------------------------------------------------------------------
 
+// Win98 icon (web/icons/<name>.png, 32x32) of each alert kind: PC popup, phone notification.
+const ALERT_ICON = {
+  forward: "envelope_closed-0", reply: "msg_question-0", blocked: "msg_error-0", limit: "msg_warning-0",
+  done: "check-0", bad: "msg_error-0",
+};
+
 class Desk extends EventEmitter {
   /**
    * @param {object} o
@@ -281,6 +287,8 @@ class Desk extends EventEmitter {
    */
   constructor(o = {}) {
     super();
+    this.setMaxListeners(100); // each phone waiting on GET /api/alerts?wait listens for "alert"
+    this._waiters = new Set();
     this.version = VERSION;
     this.dataDir = path.resolve(o.dataDir || process.env.AGENT_DESK_HOME || path.join(os.homedir(), "AgentDesk"));
     this.webDir = o.webDir ? path.resolve(o.webDir) : null;
@@ -438,11 +446,18 @@ class Desk extends EventEmitter {
 
   // --- events ---
 
-  _alert(kind, project, title, body, todoId) {
-    if (!this.config.notify) return;
+  /**
+   * Something needs the owner. Always recorded: the PC shows a popup only when config.notify is on,
+   * the phone asks GET /api/alerts on its own. `action` says what to do, in a few words.
+   */
+  _alert(kind, project, title, body, todoId, extra = {}) {
     const s = this.state;
     s.alert_seq += 1;
-    const a = { id: s.alert_seq, kind, project, title: String(title).slice(0, 200), body: String(body || "").slice(0, 600), todo: todoId ?? null, time: nowIso() };
+    const a = {
+      id: s.alert_seq, kind, project, title: String(title).slice(0, 200), body: String(body || "").slice(0, 600),
+      action: String(extra.action || "").slice(0, 200), agent: extra.agent || null, to: extra.to || null,
+      icon: ALERT_ICON[kind] || "msg_information-0", todo: todoId ?? null, time: nowIso(),
+    };
     s.alerts.push(a);
     if (s.alerts.length > LIMITS.alerts) s.alerts.splice(0, s.alerts.length - LIMITS.alerts);
     this.emit("alert", a);
@@ -552,9 +567,15 @@ class Desk extends EventEmitter {
         blocked: `${who} заблокирован`,
         limit: `${who}: закончился лимит модели`,
       };
-      this._alert(kind, ev.project, titles[kind], ev.task || ev.note, todo.id);
+      const actions = {
+        forward: `Перешлите результат агенту ${ev.to}`,
+        reply: `Ответьте агенту ${ev.agent}: он ждёт вашего решения`,
+        blocked: `Помогите агенту ${ev.agent}: он не может продолжить`,
+        limit: `Начните новую сессию или смените модель для ${ev.agent}`,
+      };
+      this._alert(kind, ev.project, titles[kind], ev.task || ev.note, todo.id, { agent: ev.agent, to: ev.to, action: actions[kind] });
     } else if (!kind && ev.state === "done") {
-      this._alert("done", ev.project, `${who} закончил`, ev.task || ev.result, null);
+      this._alert("done", ev.project, `${who} закончил`, ev.task || ev.result, null, { agent: ev.agent, action: "Проверьте результат и дайте следующую задачу" });
     }
     this._trimTodos();
   }
@@ -580,7 +601,7 @@ class Desk extends EventEmitter {
     s.rejected.push({ time: nowIso(), file: name, folder, project, error: String(error).slice(0, 300), moved_to: moved });
     if (s.rejected.length > LIMITS.rejected) s.rejected.splice(0, s.rejected.length - LIMITS.rejected);
     this.dirty = true;
-    this._alert("bad", project || "", `Маркер отклонён: ${name}`, error, null);
+    this._alert("bad", project || "", `Маркер отклонён: ${name}`, error, null, { action: "Исправьте маркер: файл не прошёл проверку" });
   }
 
   _archive(file, folder, sub) {
@@ -728,6 +749,8 @@ class Desk extends EventEmitter {
       todos: s.todos.map((t) => ({ ...t, forward_text: forwardText(t) })),
       events: s.events.slice(-LIMITS.payloadEvents).map(({ message, ...e }) => e),
       rejected: s.rejected.slice(-20),
+      alert_seq: s.alert_seq,
+      alerts: s.alerts.slice(-10),
       warnings: this.warnings,
       known_agents: Object.fromEntries([...projects].map((p) => [p, this.knownAgents(p)])),
       config: {
@@ -885,6 +908,7 @@ class Desk extends EventEmitter {
         const a = this.state.alerts.find((x) => String(x.id) === url.searchParams.get("id"));
         return a ? this._send(res, 200, a, cors) : this._send(res, 404, { error: "not found" }, cors);
       }
+      if (url.pathname === "/api/alerts") return this._waitAlerts(res, url, cors);
       if (url.pathname === "/api/pairing") {
         return auth.local ? this._send(res, 200, this.pairing(), cors) : this._send(res, 403, { error: "только на ПК" }, cors);
       }
@@ -903,6 +927,35 @@ class Desk extends EventEmitter {
     }
     const r = this._post(url.pathname, body, auth);
     return this._send(res, r.code || 200, r.body || { ok: true }, cors);
+  }
+
+  /**
+   * Alerts newer than ?after=N. With ?wait=S (at most 30) the request stays open until the next
+   * alert: the phone's background service keeps one request open instead of polling. Without a
+   * valid `after` (first call, or the PC's history was reset) the answer is just the current seq.
+   */
+  _waitAlerts(res, url, cors) {
+    const s = this.state;
+    const after = Number(url.searchParams.get("after"));
+    const valid = url.searchParams.has("after") && Number.isInteger(after) && after >= 0 && after <= s.alert_seq;
+    const answer = () => {
+      if (res.writableEnded) return;
+      this._send(res, 200, { seq: s.alert_seq, alerts: valid ? s.alerts.filter((a) => a.id > after).slice(-20) : [] }, cors);
+    };
+    const wait = Math.min(30, Math.max(0, Number(url.searchParams.get("wait")) || 0));
+    if (!valid || after < s.alert_seq || !wait) return answer();
+    let timer = null;
+    const forget = () => {
+      clearTimeout(timer);
+      this.off("alert", onAlert);
+      this._waiters.delete(finish);
+    };
+    const finish = () => { forget(); answer(); };
+    const onAlert = () => setImmediate(finish); // alerts of one scan arrive together
+    timer = setTimeout(finish, wait * 1000);
+    this.on("alert", onAlert);
+    this._waiters.add(finish);
+    res.on("close", forget);
   }
 
   _post(pathname, body, auth) {
@@ -1046,12 +1099,13 @@ class Desk extends EventEmitter {
         this.log("final save failed:", e.message);
       }
     }
+    for (const finish of [...this._waiters]) finish(); // answer waiting phones before closing
     if (this.server) {
       const server = this.server;
       this.server = null;
       await new Promise((resolve) => {
         server.close(() => resolve());
-        server.closeAllConnections?.();
+        setImmediate(() => server.closeAllConnections?.()); // after the answers above are written
       });
     }
   }

@@ -288,3 +288,50 @@ test("phone app preflight allows the home network (Chromium Private Network Acce
     await desk.stop();
   }
 });
+
+test("alerts: recorded with what to do even when PC popups are off", () => {
+  const { desk, put } = makeDesk();
+  desk.config.notify = false;
+  put({ agent: "Opus (3)", state: "done", task: "t1", to: "Astra", message: "v1" });
+  put({ agent: "Lyra", state: "blocked", task: "t2", note: "нет доступа" });
+  desk.scanOnce();
+  const [forward, blocked] = desk.state.alerts.slice(-2);
+  assert.deepEqual([forward.kind, forward.icon, forward.agent, forward.to], ["forward", "envelope_closed-0", "Opus (3)", "Astra"]);
+  assert.match(forward.action, /Astra/);
+  assert.equal(blocked.kind, "blocked");
+  assert.match(blocked.action, /Lyra/);
+  assert.equal(desk.payload().alert_seq, blocked.id);
+});
+
+test("GET /api/alerts waits for the next alert (phone background service)", async () => {
+  const { desk, put } = makeDesk();
+  await desk.start();
+  try {
+    const port = desk.boundPort;
+    const first = await request(port, { path: "/api/alerts" });
+    assert.equal(first.status, 200);
+    assert.deepEqual(first.json.alerts, [], "the first call only learns where the history ends");
+    const seq = first.json.seq;
+    const t0 = Date.now();
+    const waiting = request(port, { path: `/api/alerts?after=${seq}&wait=10` });
+    setTimeout(() => {
+      put({ agent: "Opus (3)", state: "waiting", waiting_for: "owner_input", task: "t3" });
+      desk.scanOnce();
+    }, 150);
+    const r = await waiting;
+    assert.ok(Date.now() - t0 < 5000, "answered at once, not after the timeout");
+    assert.equal(r.json.seq, seq + 1);
+    assert.deepEqual(r.json.alerts.map((a) => a.kind), ["reply"]);
+    const missed = await request(port, { path: `/api/alerts?after=${seq}&wait=10` });
+    assert.equal(missed.json.alerts.length, 1, "a phone that missed it gets it right away");
+    const reset = await request(port, { path: `/api/alerts?after=${seq + 50}&wait=10` });
+    assert.deepEqual([reset.json.seq, reset.json.alerts.length], [seq + 1, 0], "PC history reset: start over from seq");
+    const idle = request(port, { path: `/api/alerts?after=${seq + 1}&wait=30` });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const stopped = desk.stop();
+    assert.deepEqual((await idle).json.alerts, [], "stop answers waiting phones");
+    await stopped;
+  } finally {
+    await desk.stop();
+  }
+});

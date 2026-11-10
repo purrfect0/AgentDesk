@@ -52,6 +52,7 @@ async function boot() {
   }
   boundLan = desk.lanEnabled;
   desk.on("alert", (a) => {
+    if (!desk.config.notify) return; // PC popups are off; the phone still gets the alert (GET /api/alerts)
     try { showPopup(a); } catch (e) { desk.log("popup failed:", e.message); }
     if (win && !win.isDestroyed() && !win.isFocused()) win.flashFrame(true); // the taskbar button blinks
   });
