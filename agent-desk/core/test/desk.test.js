@@ -419,10 +419,12 @@ test("PC <-> laptop: pair with a code, send reminders, auto-send to the desk of 
   }
 });
 
-test("the Windows build packs every file the core loads", () => {
+test("the Windows build packs every file the core loads, the versions agree", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "package.json"), "utf8"));
   const local = ["desk.js", "peers.js"].flatMap((f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8")
     .split('require("./').slice(1).map((s) => `core/${s.slice(0, s.indexOf('"'))}`));
   assert.ok(local.includes("core/peers.js"));
   for (const f of local) assert.ok(pkg.build.files.includes(f), `${f} is missing in package.json build.files`);
+  assert.equal(require("../desk.js").VERSION, pkg.version, "core/desk.js VERSION follows package.json");
+  assert.equal(require("../../mobile/package.json").version, pkg.version, "the APK has the version of the PC app");
 });

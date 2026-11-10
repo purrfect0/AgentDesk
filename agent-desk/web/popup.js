@@ -36,7 +36,7 @@ function chime(volume = appVolume) {
       o.stop(t0 + dt + 0.55);
     });
   } catch { /* audio not allowed until the first tap */ }
-  navigator.vibrate?.([120, 60, 120]);
+  if (navigator.userActivation?.hasBeenActive) navigator.vibrate?.([120, 60, 120]); // before the first tap Chrome blocks it and logs an error
 }
 
 fetch(`/api/alert?id=${encodeURIComponent(q.get("id") || "")}`).then((r) => r.json()).then((a) => {

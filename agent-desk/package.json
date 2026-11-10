@@ -1,7 +1,7 @@
 {
   "name": "agent-desk",
   "productName": "Agent Desk",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Кто из ИИ-агентов работает, кто ждёт ответа и что нужно переслать",
   "author": "jayleywesa",
   "license": "MIT",

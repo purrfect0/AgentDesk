@@ -11,7 +11,7 @@ const os = require("node:os");
 const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
 
-const VERSION = "1.0.0";
+const VERSION = "2.2.0"; // the app version, the same as in package.json (a test checks it)
 const PROTOCOL = 2;
 const STATES = new Set(["working", "waiting", "done", "blocked", "idle"]);
 const WAITING_FOR = new Set([

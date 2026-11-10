@@ -343,7 +343,7 @@ function chime(volume = appVolume) {
       o.stop(t0 + dt + 0.55);
     });
   } catch { /* audio not allowed until the first tap */ }
-  navigator.vibrate?.([120, 60, 120]);
+  if (navigator.userActivation?.hasBeenActive) navigator.vibrate?.([120, 60, 120]); // before the first tap Chrome blocks it and logs an error
 }
 document.addEventListener("pointerdown", () => { if (audioCtx?.state === "suspended") audioCtx.resume(); }, { passive: true });
 
@@ -707,7 +707,7 @@ function peersLive(canPair) {
 const ACTIONS = {
   about() {
     dialog("О программе", `<div class="msg"><img src="${icon("network_normal_two_pcs-0")}" alt="">
-      <div><b>Agent Desk</b><br>Кто из агентов работает, кто ждёт ответа и что нужно переслать.<br><br>
+      <div><b>Agent Desk ${esc(data.app?.version || "")}</b><br>Кто из агентов работает, кто ждёт ответа и что нужно переслать.<br><br>
       Агенты появляются сами после первого маркера. Папки: ${esc(markerFolders().join("; "))}</div></div>
       <div class="buttons"><button data-close>OK</button></div>`);
   },
