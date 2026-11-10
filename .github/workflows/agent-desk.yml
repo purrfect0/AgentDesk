@@ -1,6 +1,7 @@
 # Builds the Agent Desk installers: Windows (.exe, Electron) and Android (.apk, Capacitor).
 # Artifacts: Actions -> run -> "AgentDesk-Windows" / "AgentDesk-Android".
-# A tag like agent-desk-v2.0.0 also publishes them as a GitHub Release.
+# A tag like agent-desk-v2.2.0 also publishes them as the GitHub Release "Agent Desk 2.2.0",
+# the notes come from the "## 2.2.0" section of CHANGELOG.md.
 name: Agent Desk
 
 on:
@@ -111,11 +112,21 @@ jobs:
     needs: [windows, android]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: out
           merge-multiple: true
+      - name: Release name and notes from CHANGELOG.md
+        working-directory: .
+        run: |
+          v="${GITHUB_REF_NAME#agent-desk-v}"
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          awk -v v="$v" '/^## /{p = index($0, "## " v " ") == 1; next} p' CHANGELOG.md > notes.md
+          printf '\nФайлы: AgentDesk-Setup-%s.exe для Windows и AgentDesk-%s.apk для Android. Как установить и подключить телефон: [README](https://github.com/purrfect0/AgentDesk#readme).\n' "$v" "$v" >> notes.md
+          cat notes.md
       - uses: softprops/action-gh-release@v2
         with:
-          name: Agent Desk ${{ github.ref_name }}
+          name: Agent Desk ${{ env.VERSION }}
+          body_path: notes.md
           files: out/*
