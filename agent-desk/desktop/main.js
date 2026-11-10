@@ -11,14 +11,14 @@ const WEB = path.join(__dirname, "..", "web");
 const ICON = path.join(__dirname, process.platform === "win32" ? "icon.ico" : "icon.png");
 const HIDDEN = process.argv.includes("--hidden");
 const MAX_POPUPS = 4;
-const POPUP = { w: 340, h: 136, gap: 8 };
+const POPUP = { w: 340, h: 146, gap: 8 };
 
 let desk = null;
 let win = null;
 let tray = null;
 let quitting = false;
 let boundLan = null;
-const popups = new Map(); // slot -> BrowserWindow
+const popups = []; // newest first: index 0 is the lowest popup, the others stack above it
 
 app.setAppUserModelId("app.agentdesk.desktop");
 if (!app.requestSingleInstanceLock()) {
@@ -51,7 +51,10 @@ async function boot() {
     throw e;
   }
   boundLan = desk.lanEnabled;
-  desk.on("alert", (a) => { try { showPopup(a); } catch (e) { desk.log("popup failed:", e.message); } });
+  desk.on("alert", (a) => {
+    try { showPopup(a); } catch (e) { desk.log("popup failed:", e.message); }
+    if (win && !win.isDestroyed() && !win.isFocused()) win.flashFrame(true); // the taskbar button blinks
+  });
   desk.on("show", ({ project, todo }) => showMain(project, todo));
   desk.on("config", onConfig);
   desk.on("change", updateTray);
@@ -108,10 +111,11 @@ function createWindow() {
   const b = loadBounds();
   win = new BrowserWindow({
     width: b?.width || 960, height: b?.height || 660, x: b?.x, y: b?.y,
-    minWidth: 420, minHeight: 320, frame: false, show: false, title: TITLE, icon: ICON,
+    minWidth: 420, minHeight: 320, frame: false, roundedCorners: false, show: false, title: TITLE, icon: ICON,
     backgroundColor: "#c0c0c0", webPreferences: webPreferences(),
   });
   guard(win.webContents);
+  win.on("focus", () => win.flashFrame(false));
   win.loadURL(`${base()}#native`);
   win.once("ready-to-show", () => { if (!HIDDEN) win.show(); });
   win.on("close", (e) => {
@@ -196,22 +200,53 @@ async function onConfig() {
 
 // --- popups (Win98 message boxes in the corner, like the Python version) -------------
 
+// Like the Windows 11 notification stack: the newest popup appears at the bottom and pushes the
+// older ones up; each one leaves by itself after 20 s (popup.js), the rest slide down.
+const popupArea = () => screen.getPrimaryDisplay().workArea;
+const popupY = (i) => { const a = popupArea(); return a.y + a.height - (POPUP.h + POPUP.gap) * (i + 1) - 4; };
+
+function glide(p, y) {
+  if (p.isDestroyed()) return;
+  clearInterval(p.glideTimer);
+  const [x, from] = p.getPosition();
+  if (from === y) return;
+  const t0 = Date.now();
+  const ms = 220;
+  p.glideTimer = setInterval(() => {
+    if (p.isDestroyed()) return clearInterval(p.glideTimer);
+    const k = Math.min(1, (Date.now() - t0) / ms);
+    const ease = 1 - (1 - k) ** 3;
+    p.setBounds({ x, y: Math.round(from + (y - from) * ease), width: POPUP.w, height: POPUP.h });
+    if (k >= 1) clearInterval(p.glideTimer);
+  }, 15);
+}
+
+function restack() {
+  popups.forEach((p, i) => glide(p, popupY(i)));
+}
+
+/** Plays the leave animation in the popup, then closes it (also if the page does not answer). */
+function dismiss(p) {
+  const i = popups.indexOf(p);
+  if (i >= 0) popups.splice(i, 1);
+  restack();
+  if (p.isDestroyed() || p.leaving) return;
+  p.leaving = true;
+  p.webContents.send("popup-leave");
+  setTimeout(() => { if (!p.isDestroyed()) p.destroy(); }, 700);
+}
+
 function showPopup(alert) {
   if (!desk.config.notify) return;
-  if (popups.size >= MAX_POPUPS) {
-    const oldest = Math.min(...popups.keys());
-    popups.get(oldest).destroy();
-    popups.delete(oldest);
-  }
-  let slot = 0;
-  while (popups.has(slot)) slot += 1;
-  const area = screen.getPrimaryDisplay().workArea;
+  while (popups.length >= MAX_POPUPS) dismiss(popups[popups.length - 1]);
+  const area = popupArea();
   const p = new BrowserWindow({
     x: area.x + area.width - POPUP.w - 12,
-    y: area.y + area.height - (POPUP.h + POPUP.gap) * (slot + 1) - 4,
+    y: popupY(0),
     width: POPUP.w, height: POPUP.h, frame: false, resizable: false, minimizable: false, maximizable: false,
     fullscreenable: false, skipTaskbar: true, alwaysOnTop: true, show: false, title: `${TITLE} — ${alert.project || ""}`,
-    icon: ICON, backgroundColor: "#c0c0c0", webPreferences: webPreferences(),
+    icon: ICON, transparent: true, backgroundColor: "#00000000", hasShadow: false, roundedCorners: false,
+    webPreferences: webPreferences(),
   });
   p.setAlwaysOnTop(true, "pop-up-menu");
   p.agentAlert = alert;
@@ -222,9 +257,12 @@ function showPopup(alert) {
   p.loadURL(`${base()}popup.html?${q}`);
   p.once("ready-to-show", () => p.showInactive()); // does not steal focus from the chat being typed in
   p.on("closed", () => {
-    for (const [k, v] of popups) if (v === p) popups.delete(k);
+    clearInterval(p.glideTimer);
+    const i = popups.indexOf(p);
+    if (i >= 0) { popups.splice(i, 1); restack(); }
   });
-  popups.set(slot, p);
+  popups.unshift(p);
+  restack();
 }
 
 // --- IPC from preload.js -------------------------------------------------------------
@@ -259,11 +297,17 @@ ipcMain.on("win-title", (e, title) => {
   const w = senderWindow(e);
   if (w === win) win.setTitle(String(title).slice(0, 100));
 });
+// QR code of the pairing link for the "Connect phone" dialog (SVG, black squares on white).
+ipcMain.handle("qr", async (e, text) => {
+  if (senderWindow(e) !== win || typeof text !== "string" || text.length > 500) return null;
+  return require("qrcode").toString(text, { type: "svg", errorCorrectionLevel: "M", margin: 2 });
+});
 ipcMain.on("popup", (e, what) => {
   const w = senderWindow(e);
   if (!w || !w.agentAlert) return;
   if (what === "open") showMain(w.agentAlert.project, w.agentAlert.todo);
-  w.close();
+  if (what === "gone") w.destroy(); // the leave animation has finished
+  else dismiss(w);
 });
 
 // --- quit ------------------------------------------------------------------------------

@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld("agentDesk", {
   quit: () => ipcRenderer.send("win", "quit"),
   resize: (width, height) => ipcRenderer.invoke("win-resize", Number(width), Number(height)),
   setTitle: (title) => ipcRenderer.send("win-title", String(title)),
-  popup: (what) => ipcRenderer.send("popup", what === "open" ? "open" : "close"),
+  popup: (what) => ipcRenderer.send("popup", ["open", "gone"].includes(what) ? what : "close"),
+  onPopupLeave: (cb) => ipcRenderer.on("popup-leave", () => cb()),
+  qr: (text) => ipcRenderer.invoke("qr", String(text)),
   onMaximized: (cb) => ipcRenderer.on("maximized", (_e, value) => cb(!!value)),
 });

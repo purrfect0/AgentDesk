@@ -1,6 +1,6 @@
 {
   "name": "agent-desk-mobile",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "Agent Desk для Android: те же агенты и напоминания, что на ПК, по Wi-Fi",
   "scripts": {
@@ -11,6 +11,7 @@
     "android:sync": "cap sync android"
   },
   "dependencies": {
+    "@capacitor-mlkit/barcode-scanning": "^7.0.0",
     "@capacitor/android": "^7.0.0",
     "@capacitor/core": "^7.0.0",
     "@capacitor/local-notifications": "^7.0.0"

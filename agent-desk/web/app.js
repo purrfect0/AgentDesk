@@ -29,6 +29,16 @@ const stateLabel = (a) => (a.state === "waiting" && WAIT_LABEL[a.waiting_for]) |
 const needsAction = (t) => !t.done_at && !(t.kind === "forward" && t.forwarded_at);
 const isForwardPending = (t) => t && !t.done_at && t.kind === "forward";
 const isLocal = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+// Accent animations: --ph keeps the blink phase tied to the clock (12 s fits the 1 s and 2.4 s
+// cycles), --age starts the "flash 8 times" from the moment the thing appeared, so the 2 s redraws
+// do not restart them.
+const accent = (sinceIso) => {
+  const now = Date.now();
+  const since = Date.parse(sinceIso) || now;
+  return `--ph:-${now % 12000}ms;--age:-${Math.max(0, now - since)}ms`;
+};
+// An agent that needs the owner or is not reachable: blocked, out of model limit, silent too long, waiting for you.
+const agentNeedsYou = (a) => a.state === "blocked" || (a.state === "waiting" && ["owner_input", "owner_forward", "model_limit"].includes(a.waiting_for));
 
 let data = null;
 let project = localStorage.getItem("ad.project") || "*";
@@ -104,9 +114,10 @@ function render() {
   const projects = allProjects();
   if (project !== "*" && !projects.includes(project)) project = "*";
   const openIn = (p) => data.todos.filter((t) => needsAction(t) && (p === "*" || t.project === p)).length;
-  const label = (name, n) => (n ? `${esc(name)} <b>(${n})</b>` : esc(name));
+  const newestIn = (p) => data.todos.filter((t) => needsAction(t) && (p === "*" || t.project === p)).map((t) => t.created).sort().pop();
+  const label = (name, n, p) => (n ? `${esc(name)} <b class="attn" style="${accent(newestIn(p))}">(${n})</b>` : esc(name));
   $("#project-tabs").innerHTML = [["*", "Все проекты"], ...projects.map((p) => [p, p])].map(([id, name]) =>
-    `<li role="tab" data-project="${esc(id)}" aria-selected="${id === project}"><a href="#">${label(name, openIn(id))}</a></li>`).join("");
+    `<li role="tab" data-project="${esc(id)}" aria-selected="${id === project}"><a href="#">${label(name, openIn(id), id)}</a></li>`).join("");
 
   renderTodos();
 
@@ -133,7 +144,8 @@ function render() {
       const key = `${a.project}/${a.agent}`;
       const stale = isStale(a);
       const text = esc(stale ? `${stateLabel(a)}? активность не подтверждена ${ago(a.updated)}` : stateLabel(a));
-      return `<tr class="${stale ? "stale" : ""}" data-agent="${esc(key)}">
+      const attn = stale || agentNeedsYou(a);
+      return `<tr class="${stale ? "stale" : ""}${attn ? " attn" : ""}" data-agent="${esc(key)}"${attn ? ` style="${accent(a.updated)}"` : ""}>
         <td class="c-ico"><img src="${icon(stale ? STATE_ICON.stale : STATE_ICON[a.state])}" alt=""></td>
         <td class="nowrap"><b>${esc(a.agent)}</b></td>
         <td class="nowrap state">${text}${a.state === "done" && a.to ? ` → ${esc(a.to)}` : ""}</td>
@@ -187,11 +199,15 @@ function renderTodos() {
     .sort((a, b) => (needsAction(b) - needsAction(a)) || (!!a.done_at - !!b.done_at) || b.created.localeCompare(a.created));
   const open = todos.filter(needsAction).length;
   const name = project === "*" ? "Нужно сделать" : `Нужно сделать — ${project}`;
-  $("#todo-legend").textContent = open ? `${name} (${open})` : name;
+  const legend = $("#todo-legend");
+  legend.textContent = open ? `${name} (${open})` : name;
+  legend.classList.toggle("attn", open > 0);
+  legend.style.cssText = open ? accent(todos.filter(needsAction).map((t) => t.created).sort().pop()) : "";
   $("#todo-table tbody").innerHTML = grouped(todos, 4, (t) => {
-    const cls = t.done_at ? "closed" : needsAction(t) ? "" : "pending";
+    const act = needsAction(t);
+    const cls = t.done_at ? "closed" : act ? `attn${t.kind === "forward" ? " attn-forward" : ""}` : "pending";
     const ico = t.kind === "forward" && t.forwarded_at ? "envelope_open_sheet-1" : TODO_ICON[t.kind];
-    return `<tr class="${cls}" data-todo="${t.id}">
+    return `<tr class="${cls}" data-todo="${t.id}"${act ? ` style="${accent(t.created)}"` : ""}>
       <td class="c-ico"><img src="${icon(ico)}" alt=""></td>
       <td>${todoText(t)}${t.task ? `: <span class="sub">${esc(t.task)}</span>` : ""}</td>
       <td class="nowrap status">${todoStatus(t)}</td>
@@ -322,12 +338,12 @@ function connectDialog(reason) {
   const cur = AD_HOST.server;
   dialog("Подключение к ПК", `<div class="msg"><img src="${icon("world-0")}" alt=""><div>
     ${reason ? `<p><b>${esc(reason)}</b></p>` : ""}
-    <p>На ПК откройте Agent Desk → Файл → «Подключить телефон…», отправьте ссылку себе (например, в «Избранное» мессенджера), скопируйте её здесь и вставьте в поле.</p>
+    <p>На ПК откройте Agent Desk → Файл → «Подключить телефон…» и отсканируйте QR-код. Или отправьте ссылку себе (например, в «Избранное» мессенджера), скопируйте её здесь и вставьте в поле.</p>
     <p>Телефон и ПК должны быть в одной Wi-Fi сети.</p>
     <div class="field-row-stacked"><label for="pair-link">Ссылка подключения</label>
     <input type="text" id="pair-link" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="http://192.168.1.10:8098/?key=…" value="${esc(cur ? `${cur.base}/?key=${cur.key}` : "")}"></div>
     <p id="pair-error"></p></div></div>
-    <div class="buttons"><button id="pair-ok" class="default">Подключить</button><button id="pair-paste">Вставить</button>${cur ? '<button id="pair-forget">Отключить</button>' : ""}<button data-close>Отмена</button></div>`,
+    <div class="buttons">${scanner() ? '<button id="pair-scan">Сканировать QR-код</button>' : ""}<button id="pair-ok" class="default">Подключить</button><button id="pair-paste">Вставить</button>${cur ? '<button id="pair-forget">Отключить</button>' : ""}<button data-close>Отмена</button></div>`,
   (node) => {
     const input = node.querySelector("#pair-link");
     const err = node.querySelector("#pair-error");
@@ -365,7 +381,36 @@ function connectDialog(reason) {
     };
     ok.onclick = connect;
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
+    node.querySelector("#pair-scan")?.addEventListener("click", async (e) => {
+      const s = scanner();
+      e.target.disabled = true;
+      err.textContent = "";
+      try {
+        // Google code scanner: the camera screen comes from Google Play services, no camera permission needed.
+        const { available } = await s.isGoogleBarcodeScannerModuleAvailable();
+        if (!available) {
+          await s.installGoogleBarcodeScannerModule();
+          err.textContent = "Загружаю модуль сканера от Google Play… Нажмите «Сканировать» ещё раз через несколько секунд.";
+          return;
+        }
+        const { barcodes } = await s.scan({ formats: ["QR_CODE"] });
+        const text = barcodes?.[0]?.rawValue || barcodes?.[0]?.displayValue;
+        if (!text) return;
+        input.value = text;
+        connect();
+      } catch (x) {
+        const m = String(x?.message || x);
+        err.textContent = /cancel/i.test(m) ? "" : `Сканер не запустился: ${m}. Вставьте ссылку вручную.`;
+      } finally {
+        e.target.disabled = false;
+      }
+    });
   });
+}
+
+// The QR scanner plugin of the Android app (missing in a browser).
+function scanner() {
+  return window.Capacitor?.Plugins?.BarcodeScanner || null;
 }
 
 async function act(path, body) {
@@ -499,13 +544,30 @@ const ACTIONS = {
     dialog("Подключить телефон", `<div class="msg"><img src="${icon("world-0")}" alt=""><div>
       ${p.lan ? "" : "<p><b>Доступ из Wi-Fi выключен</b> — телефон не увидит ПК. Включите его кнопкой ниже.</p>"}
       <p>1. Установите на телефон приложение Agent Desk (файл AgentDesk-*.apk).<br>
-      2. Отправьте себе эту ссылку (например, в «Избранное» мессенджера), скопируйте на телефоне и вставьте в приложении.</p>
-      ${links.map((u) => `<p class="select-all">${esc(u)}</p>`).join("")}
+      2. В приложении нажмите «Сканировать QR-код» и наведите камеру на код. Или отправьте себе ссылку, скопируйте на телефоне и вставьте в приложении.</p>
+      <div class="qr-row"><div class="qr hidden" id="pair-qr"><img alt="QR-код ссылки подключения"></div>
+      <div class="qr-links">${links.map((u, i) => `<p class="select-all${i ? "" : " on"}" data-link="${i}" title="Показать QR-код этой ссылки">${esc(u)}</p>`).join("")}
+      ${links.length > 1 ? "<p class=\"sub\">Адресов несколько: если код не подключается, нажмите на другой адрес.</p>" : ""}</div></div>
       <p>Телефон и ПК должны быть в одной Wi-Fi сети. Ссылку можно открыть и в браузере телефона, без приложения.
       В ссылке ключ доступа — не пересылайте её другим. Если телефон не подключается, разрешите Agent Desk в брандмауэре Windows для частной сети.</p></div></div>
       <div class="buttons">${p.lan ? "" : '<button id="pair-lan">Включить доступ из Wi-Fi</button>'}<button id="pair-copy">Копировать</button><button id="pair-rotate">Сменить ключ</button><button data-close>OK</button></div>`,
     (node) => {
-      node.querySelector("#pair-copy").onclick = async (e) => { e.target.textContent = (await copyText(links[0])) ? "Скопировано" : "Не удалось"; };
+      let chosen = 0;
+      const qrBox = node.querySelector("#pair-qr");
+      const showQr = async (i) => {
+        chosen = i;
+        node.querySelectorAll("[data-link]").forEach((el) => el.classList.toggle("on", Number(el.dataset.link) === i));
+        if (!window.agentDesk?.qr) return; // QR codes are drawn by the PC app
+        try {
+          const svg = await window.agentDesk.qr(links[i]);
+          if (!svg) return;
+          qrBox.querySelector("img").src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+          qrBox.classList.remove("hidden");
+        } catch { /* no QR: the link text is still there */ }
+      };
+      node.querySelectorAll("[data-link]").forEach((el) => el.addEventListener("click", () => showQr(Number(el.dataset.link))));
+      showQr(0);
+      node.querySelector("#pair-copy").onclick = async (e) => { e.target.textContent = (await copyText(links[chosen])) ? "Скопировано" : "Не удалось"; };
       node.querySelector("#pair-rotate").onclick = async () => {
         if (!confirm("Старая ссылка перестанет работать на всех телефонах. Сменить ключ?")) return;
         await act("/api/pairing/rotate", {});

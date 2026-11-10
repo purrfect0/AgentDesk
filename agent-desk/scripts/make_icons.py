@@ -44,10 +44,22 @@ def draw32():
     return im
 
 
+def classic():
+    """The original Agent Board icon: Windows 98 "two networked PCs" (web/icons, from fetch-assets.js).
+    Falls back to the drawn monitor if the icons were not downloaded."""
+    icons = ROOT / "web" / "icons"
+    try:
+        return (Image.open(icons / "network_normal_two_pcs-0.png").convert("RGBA"),
+                Image.open(icons / "network_normal_two_pcs-1.png").convert("RGBA"))
+    except OSError:
+        icon = draw32()
+        return icon, icon.resize((16, 16), Image.BOX)
+
+
 def main():
-    icon = draw32()
+    icon, small = classic()
     big = {n: icon.resize((n, n), Image.NEAREST) for n in (16, 32, 48, 64, 128, 256)}
-    big[16] = icon.resize((16, 16), Image.BOX)
+    big[16] = small.resize((16, 16), Image.NEAREST)
     (ROOT / "desktop").mkdir(exist_ok=True)
     big[256].save(ROOT / "desktop" / "icon.png")
     big[256].save(ROOT / "desktop" / "icon.ico", sizes=[(n, n) for n in (16, 32, 48, 64, 128, 256)],

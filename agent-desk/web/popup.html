@@ -6,19 +6,30 @@
 <title>Agent Desk</title>
 <link rel="stylesheet" href="vendor/98.css">
 <style>
-  :root { color-scheme: only light; }
-  html, body { margin: 0; height: 100%; overflow: hidden; background: silver; color: #000; }
+  :root { color-scheme: only light; --life: 20s; }
+  /* The OS window is transparent: only the Win98 box is visible, so it can slide in and out. */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; color: #000; }
   img { image-rendering: pixelated; }
-  .window { position: absolute; inset: 0; display: flex; flex-direction: column; }
+  .window { position: absolute; inset: 0; display: flex; flex-direction: column; animation: enter .28s cubic-bezier(.2, .8, .3, 1) both; }
+  body.leave .window { animation: leave .3s cubic-bezier(.5, 0, .9, .4) both; }
+  @keyframes enter { from { transform: translateX(105%); } to { transform: none; } }
+  @keyframes leave { from { transform: none; opacity: 1; } to { transform: translateX(105%); opacity: 0; } }
   .title-bar-text { display: flex; align-items: center; gap: 4px; flex: 1; overflow: hidden; white-space: nowrap; }
   .title-bar-text img { width: 16px; height: 16px; }
-  .window-body { flex: 1; display: flex; flex-direction: column; margin: 8px 10px 8px; min-height: 0; }
+  .window-body { flex: 1; display: flex; flex-direction: column; margin: 8px 10px 6px; min-height: 0; }
   .msg { display: flex; gap: 12px; flex: 1; min-height: 0; }
   .msg > img { width: 32px; height: 32px; flex: none; }
   .text { min-width: 0; font-size: 11px; }
   .text b { display: block; margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .text p { margin: 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
   .buttons { display: flex; justify-content: flex-end; gap: 6px; flex: none; }
+  /* 20 s countdown: a sunken Win98 progress strip; the mouse over the popup pauses it, as in Windows. */
+  .life { flex: none; height: 4px; margin: 6px 0 0; background: #fff;
+    box-shadow: inset -1px -1px #fff, inset 1px 1px grey; padding: 1px; box-sizing: border-box; }
+  .life i { display: block; height: 100%; background: navy; transform-origin: left; animation: life var(--life) linear both; }
+  .window:hover .life i, body.leave .life i { animation-play-state: paused; }
+  @keyframes life { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+  @media (prefers-reduced-motion: reduce) { .window, body.leave .window { animation-duration: 1ms; } }
 </style>
 </head>
 <body>
@@ -36,6 +47,7 @@
       <button class="default" data-do="open">Открыть</button>
       <button data-do="close">OK</button>
     </div>
+    <div class="life" title="Окно закроется само"><i id="life"></i></div>
   </div>
 </div>
 <script src="popup.js"></script>

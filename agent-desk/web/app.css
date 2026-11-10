@@ -15,6 +15,8 @@ img { image-rendering: pixelated; }
 /* Frameless desktop window: the Win98 window is the whole OS window. */
 .native-only { display: none !important; }
 body.native .native-only { display: block !important; }
+/* Menu items stay flex rows (check mark to the left of the text), not blocks. */
+body.native .menu-item.native-only { display: flex !important; }
 body.native .web-only { display: none !important; }
 /* Electron: the title bar moves the window; its buttons stay clickable. */
 body.native .title-bar { -webkit-app-region: drag; }
@@ -104,6 +106,38 @@ table.interactive > tbody > tr.highlighted td { color: #fff; }
 .dialog menu[role=tablist] { margin: 8px 0 0; }
 .dialog [role=tabpanel] > .window-body { margin: 6px; }
 tr.stale td.state { color: #800000; }
+
+/* Accents: what needs the owner blinks like a Win98 taskbar button. The animation-delay set in
+   app.js keeps the phase when the table is redrawn every 2 s, so nothing jumps. */
+tr.attn td.c-ico img { animation: ad-blink 1s steps(1) infinite; }
+tr.attn-forward td.c-ico img { animation: ad-shake 2.4s ease-in-out infinite; }
+tr.attn td.status b, tr.attn td.state { animation: ad-flash 1s steps(1) 8 both; padding: 0 2px; }
+tr.attn td.state { color: #800000; font-weight: bold; }
+table.interactive > tbody > tr.highlighted.attn td.status b,
+table.interactive > tbody > tr.highlighted.attn td.state { animation: none; color: #fff; }
+.project-tabs b.attn, #todo-legend.attn { animation: ad-flash 1s steps(1) 6 both; padding: 0 2px; }
+tr.attn td.c-ico img, tr.attn-forward td.c-ico img { animation-delay: var(--ph, 0s); }
+tr.attn td.status b, tr.attn td.state, .project-tabs b.attn, #todo-legend.attn { animation-delay: var(--age, 0s); }
+@keyframes ad-blink { 50% { opacity: .15; } }
+@keyframes ad-flash { 0% { background: navy; color: #fff; } 50% { background: transparent; color: #800000; } 100% { background: transparent; color: #800000; } }
+@keyframes ad-shake {
+  0%, 30%, 100% { transform: none; }
+  5% { transform: translateX(-2px) rotate(-8deg); } 10% { transform: translateX(2px) rotate(8deg); }
+  15% { transform: translateX(-2px) rotate(-6deg); } 20% { transform: translateX(1px) rotate(4deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  tr.attn td.c-ico img, tr.attn-forward td.c-ico img, tr.attn td.status b, tr.attn td.state { animation: none; }
+}
+
+/* QR code in the "Connect phone" dialog: white sunken field, sharp pixels. */
+.qr-row { display: flex; gap: 12px; align-items: flex-start; margin: 8px 0; }
+.qr { flex: none; width: 168px; height: 168px; background: #fff; padding: 4px;
+  box-shadow: inset -1px -1px #fff, inset 1px 1px grey, inset -2px -2px #dfdfdf, inset 2px 2px #0a0a0a; }
+.qr img { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+.qr-links { min-width: 0; flex: 1; }
+.qr-links .select-all { cursor: pointer; }
+.qr-links .select-all.on { outline: 1px dotted #000; outline-offset: 1px; }
+@media (max-width: 520px) { .qr-row { flex-direction: column; } }
 b.to { font-weight: bold; }
 
 .todo-box { flex: none; margin: 0; min-width: 0; }

@@ -4,6 +4,19 @@ const ICON = { forward: "envelope_closed-0", reply: "msg_question-0", blocked: "
 const q = new URLSearchParams(location.search);
 const send = (what) => window.agentDesk?.popup(what);
 
+// Leave animation first, then the app closes the window ("gone"). "open" also shows the main window.
+let leaving = false;
+function leave(what = "close") {
+  if (leaving) return;
+  leaving = true;
+  if (what === "open") send("open");
+  document.body.classList.add("leave");
+  setTimeout(() => send("gone"), 320);
+}
+window.agentDesk?.onPopupLeave?.(() => leave());
+// The countdown strip runs 20 s (paused while the mouse is over the popup); at the end the popup leaves.
+document.getElementById("life").addEventListener("animationend", () => leave());
+
 let audioCtx = null;
 function chime(volume = appVolume) {
   if (volume <= 0) return;
@@ -39,9 +52,9 @@ if (q.get("sound") === "1") chime(Number(q.get("volume") ?? 80));
 
 document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-do]");
-  if (b) send(b.dataset.do);
+  if (b) leave(b.dataset.do);
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") send("open");
-  if (e.key === "Escape") send("close");
+  if (e.key === "Enter") leave("open");
+  if (e.key === "Escape") leave("close");
 });

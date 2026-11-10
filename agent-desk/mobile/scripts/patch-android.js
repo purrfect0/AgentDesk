@@ -23,6 +23,10 @@ if (!manifest.includes("usesCleartextTraffic")) {
 if (!manifest.includes("android.permission.POST_NOTIFICATIONS")) {
   manifest = manifest.replace(/<\/manifest>\s*$/, '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n</manifest>\n');
 }
+if (!manifest.includes("com.google.mlkit.vision.DEPENDENCIES")) {
+  // QR pairing: Google Play services downloads the code-scanner UI together with the app.
+  manifest = manifest.replace(/<\/application>/, '    <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="barcode_ui" />\n    </application>');
+}
 fs.writeFileSync(manifestFile, manifest);
 
 let gradle = fs.readFileSync(gradleFile, "utf8");
