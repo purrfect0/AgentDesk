@@ -30,25 +30,43 @@
     return { base: `${u.protocol}//${u.host}`, key };
   }
 
-  const notifications = () => (mobile && cap.Plugins && cap.Plugins.LocalNotifications) || null;
-  let channelReady = null;
+  // Capacitor puts every native plugin of the app into Capacitor.Plugins.
+  const plugin = (name) => (mobile && cap.Plugins && cap.Plugins[name]) || null;
 
-  async function notifyReady() {
-    const ln = notifications();
-    if (!ln) return null;
-    if (!channelReady) {
-      channelReady = (async () => {
-        let perm = await ln.checkPermissions();
-        if (perm.display !== "granted") perm = await ln.requestPermissions();
-        if (perm.display !== "granted") return false;
-        try {
-          await ln.createChannel({ id: "todos", name: "Нужно сделать", description: "Пересылки и вопросы агентов", importance: 4, vibration: true });
-        } catch { /* Android < 8 has no channels */ }
-        return true;
-      })().catch(() => false);
+  /** Android 13+: the "allow notifications?" question. True when notifications may be shown. */
+  async function notifyPermission() {
+    const ln = plugin("LocalNotifications");
+    if (!ln) return false;
+    try {
+      let perm = await ln.checkPermissions();
+      if (perm.display !== "granted") perm = await ln.requestPermissions();
+      return perm.display === "granted";
+    } catch {
+      return false;
     }
-    return (await channelReady) ? ln : null;
   }
+
+  // The background watcher of the phone app (mobile/native/java: WatchService, AgentDeskPlugin):
+  // a foreground service keeps one request to the PC open, also with the screen off, and shows each
+  // alert as a Win98-style notification with the app's own chime.
+  const native = () => plugin("AgentDesk");
+  const watch = {
+    get available() { return !!native(); },
+    /** Starts the watcher for the paired PC (after a new pairing it switches to the new PC). */
+    async start() {
+      if (!native() || !server) return null;
+      await notifyPermission();
+      return native().start({ base: server.base, key: server.key });
+    },
+    async stop() { return native() ? native().stop() : null; },
+    /** {enabled, running, lastOk, lastError, notifications, unrestricted} or null outside the app. */
+    async status() { return native() ? native().status() : null; },
+    /** A sample notification after `delay` seconds: turn the screen off and wait for it. */
+    async test(delay = 10) { return native() ? native().test({ delay }) : null; },
+    async openBattery() { return native() ? native().openBatterySettings() : null; },
+    async openApp() { return native() ? native().openAppSettings() : null; },
+    async openNotifications() { return native() ? native().openNotificationSettings() : null; },
+  };
 
   window.AD_HOST = {
     kind: desktop ? "desktop" : mobile ? "mobile" : "browser",
@@ -62,23 +80,17 @@
     forgetServer() {
       server = null;
       localStorage.removeItem(STORE);
+      watch.stop().catch(() => {});
     },
     base() { return mobile && server ? server.base : ""; },
     headers() { return mobile && server ? { "X-Agent-Desk-Key": server.key } : {}; },
-    notifyPermission: notifyReady,
-    /** Android notification; a tap opens the app on that reminder. */
-    async notify({ id, title, body, project, todo }) {
-      const ln = await notifyReady();
-      if (!ln) return;
-      await ln.schedule({
-        notifications: [{ id: (Number(id) || Date.now()) % 2147483647, title, body: body || "", channelId: "todos", extra: { project, todo } }],
-      });
-    },
+    notifyPermission,
+    watch,
+    /** A tap on a phone notification opens the app on that reminder: cb(project, todoId). */
     onNotificationTap(cb) {
-      const ln = notifications();
-      ln?.addListener("localNotificationActionPerformed", (e) => {
-        const x = (e && e.notification && e.notification.extra) || {};
-        cb(x.project || null, Number.isInteger(x.todo) ? x.todo : null);
+      native()?.addListener("tap", (e) => {
+        const todo = e && Number.isInteger(e.todo) && e.todo >= 0 ? e.todo : null;
+        cb((e && e.project) || null, todo);
       });
     },
   };

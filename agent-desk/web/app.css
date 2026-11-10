@@ -189,6 +189,18 @@ tr.group td {
 .dialog .msg { display: flex; gap: 12px; align-items: flex-start; }
 .dialog .msg > img { width: 32px; height: 32px; flex: none; }
 .dialog .buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
+.dialog .buttons.wrap { flex-wrap: wrap; }
+.checklist { margin: 8px 0; padding-left: 18px; }
+.checklist li { margin: 4px 0; }
+.checklist .ok { color: #008000; }
+.checklist .bad { color: #a00000; }
+/* Phone: Win98 message windows for new alerts while the app is on screen (app.js phoneToasts). */
+#toasts { position: fixed; top: 6px; left: 6px; right: 6px; z-index: 150; display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
+#toasts .toast { pointer-events: auto; animation: toast-in 0.2s steps(5) both; }
+#toasts .toast .window-body { display: flex; gap: 10px; align-items: flex-start; margin: 8px; }
+#toasts .toast .window-body > img { width: 32px; height: 32px; flex: none; image-rendering: pixelated; }
+#toasts .toast p { margin: 4px 0 0; }
+@keyframes toast-in { from { transform: translateY(-120%); } }
 .dialog textarea { width: 100%; box-sizing: border-box; height: 230px; font-family: "Courier New", monospace; font-size: 12px; }
 .dialog input[type=text] { width: 100%; box-sizing: border-box; }
 .dialog .field-row-stacked { margin-bottom: 8px; }

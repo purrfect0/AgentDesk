@@ -11,11 +11,13 @@ import com.getcapacitor.BridgeActivity;
 /**
  * Agent Desk takes the whole screen: the status bar strip on top and the navigation bar are
  * hidden (a swipe from the edge shows them for a moment), the camera cutout area is used too.
- * Copied over the generated MainActivity by mobile/scripts/patch-android.js.
+ * While the app is on screen the background watcher shows no Android notifications: the app
+ * shows its own Win98 toasts. Copied over the generated MainActivity by mobile/scripts/patch-android.js.
  */
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(AgentDeskPlugin.class); // before super: the bridge reads the plugin list there
         super.onCreate(savedInstanceState);
         if (Build.VERSION.SDK_INT >= 28) {
             WindowManager.LayoutParams lp = getWindow().getAttributes();
@@ -31,7 +33,14 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        WatchService.appVisible = true;
         fullScreen();
+    }
+
+    @Override
+    public void onPause() {
+        WatchService.appVisible = false;
+        super.onPause();
     }
 
     @Override

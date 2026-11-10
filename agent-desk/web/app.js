@@ -337,18 +337,45 @@ function checkAlerts() {
   const key = (t) => `${t.id}:${t.created}`;
   const fresh = seenAlerts ? open.filter((t) => !seenAlerts.has(key(t))) : [];
   seenAlerts = new Set(open.map(key));
+  // Phone app: Win98 windows while the app is on screen; while it is hidden, the background
+  // watcher (AD_HOST.watch) shows Android notifications with the same chime.
+  if (AD_HOST.kind === "mobile") return phoneToasts();
   if (!fresh.length) return;
-  // Phone app in the background: an Android notification instead of the chime.
-  if (AD_HOST.kind === "mobile" && document.hidden) {
-    if (phoneNotify) {
-      for (const t of fresh.slice(0, 5)) {
-        AD_HOST.notify({ id: t.id, title: plain(todoText(t)), body: [t.project, t.task].filter(Boolean).join(" · "), project: t.project, todo: t.id });
-      }
-    }
-    return;
-  }
   // On the PC the popups have their own sound; the window chimes only when popups are off.
   if (soundOn && (!isNative || !data.config.notify)) chime();
+}
+
+// Phone app on screen: a Win98 message window slides in at the top for each new alert of the PC
+// (data.alerts: what happened and what to do). A tap opens the reminder, the cross closes it.
+let toastSeq = null;
+let resyncToasts = false; // back on screen: what came meanwhile was an Android notification already
+function phoneToasts() {
+  const seq = Number(data.alert_seq) || 0;
+  const fresh = toastSeq === null || seq < toastSeq ? [] : (data.alerts || []).filter((a) => a.id > toastSeq);
+  toastSeq = seq;
+  if (!fresh.length || document.hidden) return;
+  let box = $("#toasts");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "toasts";
+    document.body.append(box);
+  }
+  for (const a of fresh.slice(-3)) {
+    const el = document.createElement("div");
+    el.className = "window toast";
+    el.innerHTML = `<div class="title-bar"><div class="title-bar-text">Agent Desk${a.project ? ` — ${esc(a.project)}` : ""}</div>
+      <div class="title-bar-controls"><button aria-label="Close" data-toast-close></button></div></div>
+      <div class="window-body"><img src="${icon(a.icon || "msg_information-0")}" alt="">
+      <div><b>${esc(a.title)}</b>${a.action ? `<p>${esc(a.action)}</p>` : ""}${a.body ? `<p class="sub">${esc(a.body)}</p>` : ""}</div></div>`;
+    el.addEventListener("click", (e) => {
+      el.remove();
+      if (!e.target.closest("[data-toast-close]")) window.abFocus(a.project, Number.isInteger(a.todo) ? a.todo : null);
+    });
+    box.prepend(el);
+    setTimeout(() => el.remove(), 20000);
+  }
+  while (box.children.length > 3) box.lastElementChild.remove();
+  if (soundOn) chime();
 }
 
 // --- data -----------------------------------------------------------------------
@@ -399,8 +426,10 @@ async function poll() {
     if (!next.unchanged) {
       data = next;
       lastVersion = next.version;
+      if (resyncToasts) toastSeq = Number(next.alert_seq) || 0;
       checkAlerts();
     }
+    resyncToasts = false;
   } catch (e) {
     online = false;
     if (e.status === 403 && AD_HOST.kind === "mobile") connectDialog("Ключ не подошёл: на ПК его могли сменить. Вставьте новую ссылку.");
@@ -415,6 +444,20 @@ function showStatus() {
   if (data) return;
   $("#sb-main").textContent = AD_HOST.kind === "mobile" && !AD_HOST.server ? "Телефон не подключён к ПК"
     : online ? "Загрузка…" : "Нет связи с Agent Desk на ПК";
+}
+
+// Phone app: the background watcher runs while the phone is paired and "Уведомления на телефоне"
+// is on. After the first pairing the settings dialog shows what Android may still block.
+async function startWatch(explain) {
+  if (AD_HOST.kind !== "mobile" || !AD_HOST.server || !AD_HOST.watch.available) return;
+  try {
+    await AD_HOST.watch.start();
+    const st = await AD_HOST.watch.status();
+    if (explain && st && !(st.notifications && st.unrestricted) && !localStorage.getItem("ad.bgHint")) {
+      localStorage.setItem("ad.bgHint", "1");
+      ACTIONS["phone-notify"]();
+    }
+  } catch { /* refused by the native part: the settings dialog shows the reason */ }
 }
 
 function closeDialog() {
@@ -459,9 +502,10 @@ function connectDialog(reason) {
         data = null;
         lastVersion = -1;
         seenAlerts = null;
+        toastSeq = null;
         closeDialog();
-        if (phoneNotify) AD_HOST.notifyPermission();
         poll();
+        if (phoneNotify) startWatch(true);
       } catch (e) {
         err.textContent = e.status === 403 ? "Ключ не подошёл. Скопируйте ссылку на ПК заново."
           : "ПК не отвечает. Проверьте: Agent Desk запущен, телефон в той же Wi-Fi сети, на ПК включён доступ из Wi-Fi и Agent Desk разрешён в брандмауэре.";
@@ -672,11 +716,40 @@ const ACTIONS = {
   },
   connect() { connectDialog(); },
   "toggle-autostart"() { act("/api/config", { autostart: !data.config.autostart }); },
-  "toggle-phone-notify"() {
-    phoneNotify = !phoneNotify;
-    localStorage.setItem("ad.phoneNotify", phoneNotify ? "1" : "0");
-    if (phoneNotify) AD_HOST.notifyPermission();
-    render();
+  async "phone-notify"() {
+    const st = (await AD_HOST.watch.status().catch(() => null)) || {};
+    const mark = (ok, good, bad) => `<span class="${ok ? "ok" : "bad"}">${ok ? good : bad}</span>`;
+    const last = st.lastOk ? `ПК ответил в ${hhmm(new Date(st.lastOk).toISOString())}` : "ПК пока не ответил";
+    const link = !phoneNotify ? mark(false, "", "выключена")
+      : st.running ? mark(!st.lastError, `работает, ${last}`, "нет связи с ПК") : mark(false, "", "не запущена");
+    dialog("Уведомления на телефоне", `<div class="msg"><img src="${icon("envelope_closed-0")}" alt=""><div>
+      <p>Когда Agent Desk свёрнут или экран выключен, телефон держит связь с ПК и показывает уведомление в стиле Windows 98 со звуком приложения: что случилось и что сделать.</p>
+      <ul class="checklist">
+        <li>Фоновая связь: ${link}${st.lastError ? ` <span class="sub">(${esc(st.lastError)})</span>` : ""}</li>
+        <li>Уведомления: ${mark(st.notifications, "разрешены", "запрещены — нажмите «Уведомления…»")}</li>
+        <li>Батарея: ${mark(st.unrestricted, "без ограничений", "Android может усыпить связь — нажмите «Батарея…»")}</li>
+      </ul>
+      <p class="sub">Nubia, RedMagic, Xiaomi и другие оболочки усыпляют фоновые приложения сильнее обычного Android. В «О приложении…» включите <b>Автозапуск</b> и выберите для батареи <b>Без ограничений</b>; в списке недавних приложений закрепите Agent Desk замком.</p>
+    </div></div>
+    <div class="buttons wrap"><button id="pn-toggle">${phoneNotify ? "Выключить" : "Включить"}</button><button id="pn-test"${phoneNotify ? "" : " disabled"}>Проверить</button><button id="pn-notif">Уведомления…</button><button id="pn-battery">Батарея…</button><button id="pn-app">О приложении…</button><button data-close class="default">OK</button></div>`,
+    (node, close) => {
+      node.querySelector("#pn-toggle").onclick = async () => {
+        phoneNotify = !phoneNotify;
+        localStorage.setItem("ad.phoneNotify", phoneNotify ? "1" : "0");
+        try { await (phoneNotify ? AD_HOST.watch.start() : AD_HOST.watch.stop()); } catch { /* the dialog shows the state */ }
+        close();
+        render();
+        setTimeout(() => ACTIONS["phone-notify"](), 400);
+      };
+      node.querySelector("#pn-test").onclick = async (e) => {
+        e.target.disabled = true;
+        await AD_HOST.watch.test(10);
+        e.target.textContent = "Выключите экран: 10 с";
+      };
+      node.querySelector("#pn-notif").onclick = () => AD_HOST.watch.openNotifications();
+      node.querySelector("#pn-battery").onclick = () => AD_HOST.watch.openBattery();
+      node.querySelector("#pn-app").onclick = () => AD_HOST.watch.openApp();
+    });
   },
   folders() {
     const rows = data.config.watch.map((w, i) => `<div class="field-row">
@@ -979,7 +1052,14 @@ window.abFocus = (proj, todoId) => {
 };
 
 AD_HOST.onNotificationTap((proj, todoId) => window.abFocus(proj, todoId));
-document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  resyncToasts = true;
+  poll();
+  // Back from the Android settings: show what has changed.
+  if (document.querySelector("#pn-toggle")) { closeDialog(); ACTIONS["phone-notify"](); }
+});
+if (phoneNotify) startWatch(false); // also after an app update: the watcher follows the paired PC
 
 poll();
 setInterval(poll, 2000);
