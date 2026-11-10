@@ -26,6 +26,9 @@ body:not(.mobile) .mobile-only { display: none !important; }
 body.mobile [data-action="pair"], body.mobile [data-action="folders"],
 body.mobile [data-action="toggle-notify"], body.mobile [data-action="toggle-popup-sound"] { display: none !important; }
 body.mobile { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); box-sizing: border-box; }
+/* Phone: sizes from app.js keep one pixel of the pixel font on whole screen pixels (crisp text). */
+body.mobile :is(.title-bar, .window, button, input, label, legend, li[role=tab], option, select, textarea, ul.tree-view) { font-size: var(--font-base, 11px); }
+body.mobile :is(table, .menubar, .status-bar-field, .dialog, .dialog .window-body) { font-size: var(--font-ui, 13px); }
 #pair-link { width: 100%; box-sizing: border-box; }
 #pair-error { color: #800000; min-height: 1em; }
 body.native { background: silver; }

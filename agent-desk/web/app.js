@@ -879,6 +879,17 @@ const desk = AD_HOST.desktop;
 const isNative = !!desk;
 document.body.classList.toggle("native", isNative);
 document.body.classList.toggle("mobile", AD_HOST.kind === "mobile");
+// Phone: the pixel font is drawn for 11 px. Font sizes are rounded so that one font pixel is a whole
+// number of screen pixels (3 or 4 on a phone): text stays as crisp as on a Win98 screen instead of
+// smearing between pixels. app.css uses --font-base (11 px text) and --font-ui (13 px text).
+if (AD_HOST.kind === "mobile") {
+  const crisp = (size) => {
+    const dpr = window.devicePixelRatio || 1;
+    return `${(11 * Math.max(1, Math.round((dpr * size) / 11))) / dpr}px`;
+  };
+  document.documentElement.style.setProperty("--font-base", crisp(11));
+  document.documentElement.style.setProperty("--font-ui", crisp(13));
+}
 const native = () => desk;
 desk?.onMaximized((maximized) => {
   $("#win-max").setAttribute("aria-label", maximized ? "Restore" : "Maximize");

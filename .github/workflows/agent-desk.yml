@@ -29,6 +29,8 @@ jobs:
           node-version: 22
       - name: Core tests
         run: node --test --test-reporter=spec core/test/desk.test.js
+      - name: Cyrillic pixel font is up to date
+        run: node scripts/make-font.js --check
 
   windows:
     needs: test
