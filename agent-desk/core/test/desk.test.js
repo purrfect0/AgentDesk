@@ -335,3 +335,94 @@ test("GET /api/alerts waits for the next alert (phone background service)", asyn
     await desk.stop();
   }
 });
+
+async function until(fn, ms = 4000) {
+  const t0 = Date.now();
+  while (!fn()) {
+    if (Date.now() - t0 > ms) throw new Error("timeout");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+test("PC <-> laptop: pair with a code, send reminders, auto-send to the desk of the addressee", async () => {
+  const pc = makeDesk();
+  const laptop = makeDesk();
+  await pc.desk.start();
+  await laptop.desk.start();
+  try {
+    const onPc = { ok: true, local: true };
+    const fromPhone = { ok: true, local: false };
+    const pcId = pc.desk.config.device_id;
+    const laptopId = laptop.desk.config.device_id;
+    assert.match(pcId, /^[0-9a-f]{16}$/);
+    assert.notEqual(pcId, laptopId);
+
+    // Pairing: the PC asks, the owner compares the code on the laptop and allows it there.
+    const asked = await pc.desk.peers.local("connect", { address: `127.0.0.1:${laptop.desk.boundPort}` }, onPc);
+    assert.match(asked.body.code, /^\d{4}$/);
+    const [request0] = laptop.desk.peers.payload().requests;
+    assert.deepEqual([request0.id, request0.code], [pcId, asked.body.code]);
+    assert.equal(laptop.desk.state.alerts.at(-1).kind, "peer");
+    assert.equal((await laptop.desk.peers.local("accept", { id: pcId }, fromPhone)).code, 403, "pairing only on the computer itself");
+    assert.equal((await laptop.desk.peers.local("accept", { id: pcId }, onPc)).code, undefined);
+    assert.deepEqual(pc.desk.config.peers.map((p) => p.id), [laptopId]);
+    assert.deepEqual(laptop.desk.config.peers.map((p) => p.id), [pcId]);
+    const pcKey = pc.desk.config.peers[0].key;
+    assert.equal(JSON.stringify(pc.desk.payload()).includes(pcKey), false, "keys of the pair never reach the UI");
+    const again = new Desk({ dataDir: pc.desk.dataDir, legacyDir: null, port: 0, lan: false, log: () => {} });
+    assert.deepEqual([again.config.device_id, again.config.peers[0].id], [pcId, laptopId], "the pair survives a restart");
+
+    // The desk-to-desk API needs the key of the pair: the phone key does not open it.
+    const inbox = (headers) => post(laptop.desk.boundPort, "/api/p2p/inbox", { todos: [] }, headers);
+    assert.equal((await inbox({})).status, 403);
+    assert.equal((await inbox({ "x-agent-desk-peer": laptop.desk.config.key })).status, 403);
+    assert.equal((await inbox({ "x-agent-desk-peer": pcKey })).status, 200);
+
+    // Astra works on the laptop: the PC learns it.
+    laptop.put({ agent: "Astra", state: "working", task: "t0" });
+    laptop.desk.scanOnce();
+    const status = await pc.desk.peers.check(pc.desk.config.peers[0]);
+    assert.equal(status.online, true);
+    assert.ok(status.agents.AZS.includes("Astra"));
+
+    // By hand (also from the phone): the reminder goes to the laptop and is closed on the PC.
+    pc.put({ agent: "Opus (3)", state: "done", task: "t1", to: "Astra", message: "v1" });
+    pc.desk.scanOnce();
+    const [t1] = open(pc.desk);
+    assert.equal(t1.kind, "forward");
+    const sent = await pc.desk.peers.local("send", { peer: laptopId, todos: [t1.id] }, fromPhone);
+    assert.deepEqual(sent.body, { sent: 1, name: laptop.desk.peers.name });
+    assert.ok(t1.done_at);
+    assert.equal(t1.sent_to.id, laptopId);
+    const [got] = open(laptop.desk);
+    assert.deepEqual([got.kind, got.agent, got.to, got.message, got.from_device.id], ["forward", "Opus (3)", "Astra", "v1", pcId]);
+    assert.equal(got.warning, undefined, "Astra is known on the laptop");
+    assert.match(laptop.desk.state.alerts.at(-1).title, /^С «/);
+    assert.equal((await pc.desk.peers.local("send", { peer: laptopId, todos: [t1.id] }, onPc)).code, 400, "already sent");
+
+    // Auto-send: a reminder for an agent of the laptop goes there, without a popup on the PC.
+    await pc.desk.peers.local("settings", { auto: true }, onPc);
+    const seq = pc.desk.state.alert_seq;
+    pc.put({ agent: "Opus (3)", state: "done", task: "t2", to: "astra", message: "v2" });
+    pc.desk.scanOnce();
+    await until(() => open(pc.desk).length === 0 && open(laptop.desk).length === 2);
+    assert.equal(pc.desk.state.alert_seq, seq, "no popup on the PC");
+    assert.equal(pc.desk.state.todos.at(-1).sent_to.auto, true);
+    // A reminder for an agent of the PC itself stays on the PC.
+    pc.put({ agent: "Lyra", state: "working", task: "t3" });
+    pc.put({ agent: "Opus (3)", state: "done", task: "t3", to: "Lyra", message: "v3" });
+    pc.desk.scanOnce();
+    assert.deepEqual(open(pc.desk).map((t) => t.to), ["Lyra"]);
+  } finally {
+    await pc.desk.stop();
+    await laptop.desk.stop();
+  }
+});
+
+test("the Windows build packs every file the core loads", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "package.json"), "utf8"));
+  const local = ["desk.js", "peers.js"].flatMap((f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8")
+    .split('require("./').slice(1).map((s) => `core/${s.slice(0, s.indexOf('"'))}`));
+  assert.ok(local.includes("core/peers.js"));
+  for (const f of local) assert.ok(pkg.build.files.includes(f), `${f} is missing in package.json build.files`);
+});

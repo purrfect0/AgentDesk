@@ -31,6 +31,7 @@
     "files": [
       "package.json",
       "core/desk.js",
+      "core/peers.js",
       "desktop/**",
       "web/**",
       "!web/**/*.md"

@@ -38,7 +38,7 @@ const ours = (url) => typeof url === "string" && desk && url.startsWith(base());
 
 async function boot() {
   Menu.setApplicationMenu(null);
-  desk = new Desk({ webDir: WEB });
+  desk = new Desk({ webDir: WEB, discovery: true }); // discovery: Agent Desks of the Wi-Fi find each other (core/peers.js)
   try {
     await desk.start();
   } catch (e) {
@@ -145,6 +145,12 @@ function showMain(project, todo) {
   }
 }
 
+// Another computer of the Wi-Fi asks to pair, or a pair is ready: the "Другие компьютеры" dialog.
+function showPeers() {
+  showMain();
+  win.webContents.executeJavaScript("window.abPeers && window.abPeers()").catch(() => {});
+}
+
 // --- tray --------------------------------------------------------------------------
 
 function createTray() {
@@ -158,6 +164,7 @@ function rebuildTrayMenu() {
   if (!tray) return;
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "Открыть Agent Desk", click: () => showMain() },
+    { label: "Другие компьютеры…", click: () => showPeers() },
     { type: "separator" },
     { label: "Всплывающие окна", type: "checkbox", checked: !!desk.config.notify, click: (i) => setConfig({ notify: i.checked }) },
     { label: "Запускать вместе с Windows", type: "checkbox", checked: !!desk.config.autostart, click: (i) => setConfig({ autostart: i.checked }) },
@@ -306,7 +313,10 @@ ipcMain.handle("qr", async (e, text) => {
 ipcMain.on("popup", (e, what) => {
   const w = senderWindow(e);
   if (!w || !w.agentAlert) return;
-  if (what === "open") showMain(w.agentAlert.project, w.agentAlert.todo);
+  if (what === "open") {
+    if (w.agentAlert.kind === "peer") showPeers();
+    else showMain(w.agentAlert.project, w.agentAlert.todo);
+  }
   if (what === "gone") w.destroy(); // the leave animation has finished
   else dismiss(w);
 });

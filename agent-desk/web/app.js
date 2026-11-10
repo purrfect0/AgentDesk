@@ -148,6 +148,8 @@ function todoText(t) {
 }
 
 function todoStatus(t) {
+  if (t.sent_to && t.done_at) return `отправлено → «${esc(t.sent_to.name)}»`;
+  if (t.routing && !t.done_at) return `отправляю → «${esc(t.routing.name)}»…`;
   if (t.kind === "forward") {
     if (t.acked_at) return "получено ✓";
     if (t.forwarded_at) return "переслано, ждём подтверждения";
@@ -155,6 +157,14 @@ function todoStatus(t) {
     return "<b>не переслано</b>";
   }
   return t.done_at ? "закрыто" : { reply: "<b>ждёт ответа</b>", limit: "<b>нужна новая сессия</b>", blocked: "<b>нужна помощь</b>" }[t.kind];
+}
+
+// PC <-> laptop (core/peers.js): which computer a reminder came from, why it was not sent.
+function peerNote(t) {
+  const parts = [];
+  if (t.from_device) parts.push(`с «${esc(t.from_device.name)}»`);
+  if (t.send_error && !t.done_at) parts.push(`<span class="bad">не отправилось: ${esc(t.send_error)}</span>`);
+  return parts.length ? ` <span class="sub peer-note">· ${parts.join(" · ")}</span>` : "";
 }
 
 // --- rendering ------------------------------------------------------------------
@@ -256,6 +266,8 @@ function render() {
   const soundIcon = icon(soundState ? "loudspeaker_rays-0" : "loudspeaker_muted-0");
   if ($("#tb-sound").getAttribute("src") !== soundIcon) $("#tb-sound").src = soundIcon;
   $("#popup-sound-check").classList.toggle("on", data.config.popup_sound !== false);
+  const live = document.querySelector("#peers-live"); // the "Другие компьютеры" dialog is open
+  if (live) patch(live, peersLive(live.dataset.pair === "1"));
   applySelection();
 }
 
@@ -269,6 +281,9 @@ function applySelection() {
   $("#tb-copy").disabled = !todo?.message;
   $("#tb-forwarded").disabled = !(isForwardPending(todo) && !todo.forwarded_at);
   $("#tb-done").disabled = !(todo && !todo.done_at);
+  const peers = data.link?.peers || [];
+  $("#tb-send").classList.toggle("hidden", !peers.length); // shown once another computer is paired
+  $("#tb-send").disabled = !(todo && !todo.done_at && peers.length);
   $("#tb-details").disabled = !selected;
   $("#tb-forget").disabled = selected?.type !== "agent";
 }
@@ -299,7 +314,7 @@ function renderTodos() {
     const ico = t.kind === "forward" && t.forwarded_at ? "envelope_open_sheet-1" : TODO_ICON[t.kind];
     return `<tr class="${cls}" data-key="t:${t.id}" data-todo="${t.id}"${act ? ` data-since="${esc(t.created)}" style="${accent(t.created)}"` : ""}>
       <td class="c-ico"><img src="${icon(ico)}" alt=""></td>
-      <td>${todoText(t)}${t.task ? `: <span class="sub">${esc(t.task)}</span>` : ""}</td>
+      <td>${todoText(t)}${t.task ? `: <span class="sub">${esc(t.task)}</span>` : ""}${peerNote(t)}</td>
       <td class="nowrap status">${todoStatus(t)}</td>
       <td class="nowrap opt">${esc(ago(t.created))}</td></tr>`;
   }));
@@ -642,6 +657,53 @@ async function copyText(text) {
   }
 }
 
+// --- other computers of the Wi-Fi (core/peers.js) -------------------------------
+
+// The changing part of the "Другие компьютеры" dialog: render() redraws it in place while it is open.
+function peersLive(canPair) {
+  const link = data.link;
+  if (!link) return '<p class="peer-warn" data-key="old">На ПК старая версия Agent Desk: обновите её, чтобы связать компьютеры.</p>';
+  const btn = (action, label, id, extra = "") => (canPair ? `<button data-peer="${action}" data-id="${esc(id)}"${extra}>${label}</button>` : "");
+  const row = (key, ico, text, buttons = "") =>
+    `<div class="peer-row" data-key="${esc(key)}"><img src="${icon(ico)}" alt=""><div class="peer-text">${text}</div>${buttons}</div>`;
+  const box = (key, title, rows) => `<fieldset class="peer-box" data-key="${key}"><legend>${title}</legend>${rows}</fieldset>`;
+  const agentsOf = (p) => [...new Set(Object.values(p.agents || {}).flat())];
+  const state = (p) => {
+    if (p.online === null) return "проверяю связь…";
+    if (!p.online) return `<span class="bad">не в сети</span>${p.error ? ` <span class="sub">(${esc(p.error)})</span>` : ""}`;
+    const n = agentsOf(p).length;
+    return `<span class="ok">в сети</span>${n ? `, агентов: ${n}` : ""}`;
+  };
+  const out = [];
+  if (!link.lan) {
+    out.push(`<p class="peer-warn" data-key="lan"><b>Доступ из Wi-Fi выключен</b> — другие компьютеры не видят этот.${canPair ? ' <button data-peer="lan">Включить</button>' : ""}</p>`);
+  }
+  if (link.requests?.length) {
+    out.push(box("req", "Просят подключиться", link.requests.map((r) => row(`r:${r.id}`, "msg_question-2",
+      `<b>«${esc(r.name)}»</b> <span class="sub">${esc(r.ip)}</span><br>Код <b class="peer-code">${esc(r.code)}</b> — разрешайте, только если там показан этот же код`,
+      btn("accept", "Разрешить", r.id) + btn("reject", "Отклонить", r.id))).join("")));
+  }
+  if (link.outgoing?.length) {
+    out.push(box("out", "Ждут разрешения", link.outgoing.map((o) => row(`o:${o.id}`, "application_hourglass-1",
+      `<b>«${esc(o.name)}»</b><br>Код <b class="peer-code">${esc(o.code)}</b> — на том компьютере нажмите «Разрешить»`,
+      btn("cancel", "Отменить", o.id))).join("")));
+  }
+  const peers = link.peers || [];
+  out.push(box("peers", "Подключённые компьютеры", peers.length
+    ? peers.map((p) => row(`p:${p.id}`, p.online === false ? "msg_warning-2" : "network_normal_two_pcs-1",
+      `<b>«${esc(p.name)}»</b> <span class="sub">${esc(String(p.base || "").replace("http://", ""))}</span><br><span title="${esc(agentsOf(p).join(", "))}">${state(p)}</span>`,
+      btn("remove", "Отключить", p.id))).join("")
+    : '<p class="sub" data-key="none">Пока нет. Запустите Agent Desk на другом компьютере этой Wi-Fi сети и подключите его здесь.</p>'));
+  if (canPair && link.lan) {
+    const near = link.nearby || [];
+    out.push(box("near", "Найдены в Wi-Fi", near.length
+      ? near.map((n) => row(`n:${n.id}`, "computer-1", `<b>«${esc(n.name)}»</b> <span class="sub">${esc(n.ip)}</span>`,
+        btn("connect", "Подключить", n.id, ` data-address="${esc(`${n.ip}:${n.port}`)}"`))).join("")
+      : `<p class="sub" data-key="none">${link.discovery ? "Ищу… На другом компьютере тоже включите доступ из Wi-Fi. Если он не находится, введите его адрес ниже." : "Поиск выключен: введите адрес другого компьютера ниже."}</p>`));
+  }
+  return out.join("");
+}
+
 const ACTIONS = {
   about() {
     dialog("О программе", `<div class="msg"><img src="${icon("network_normal_two_pcs-0")}" alt="">
@@ -715,6 +777,90 @@ const ACTIONS = {
     });
   },
   connect() { connectDialog(); },
+  // PC <-> laptop (core/peers.js): Agent Desks of one Wi-Fi find each other, are paired once
+  // (the same code on both screens), then send reminders to each other.
+  peers() {
+    const canPair = isLocal && AD_HOST.kind !== "mobile"; // pairing only on the PC itself
+    const link = data.link || {};
+    dialog("Другие компьютеры", `<div class="msg"><img src="${icon("network_normal_two_pcs-0")}" alt=""><div class="peers">
+      <p>Agent Desk на другом компьютере этой же Wi-Fi сети (например, на ноутбуке) принимает задачи отсюда и присылает свои: выберите задачу и нажмите «Отправить».</p>
+      <div id="peers-live" data-pair="${canPair ? 1 : 0}">${peersLive(canPair)}</div>
+      ${canPair ? `<div class="field-row"><label for="peer-addr">Адрес:</label><input type="text" id="peer-addr" placeholder="192.168.1.20 или laptop:8098" autocomplete="off" autocapitalize="off" spellcheck="false"><button id="peer-add">Подключить</button></div>
+      <fieldset><legend>Этот компьютер</legend>
+        <div class="field-row"><label for="peer-name">Имя:</label><input type="text" id="peer-name" maxlength="60" value="${esc(link.name)}"><button id="peer-name-save">Сохранить</button></div>
+        <div class="field-row"><input type="checkbox" id="peer-auto"${link.auto ? " checked" : ""}><label for="peer-auto">Пересылку агенту с другого компьютера отправлять туда самому</label></div>
+      </fieldset>
+      <p class="sub">Брандмауэр Windows должен пропускать Agent Desk в частной сети (TCP 8098 и UDP 8099).</p>` : '<p class="sub">Подключать компьютеры можно только на самом ПК, отправлять задачи — и с телефона.</p>'}
+      <p id="peer-msg"></p></div></div>
+      <div class="buttons"><button data-close class="default">OK</button></div>`,
+    (node) => {
+      const msg = node.querySelector("#peer-msg");
+      const say = (text, bad = false) => { msg.textContent = text; msg.classList.toggle("bad", bad); };
+      const run = async (action, body, btn) => {
+        say("");
+        if (btn) btn.disabled = true;
+        try {
+          const r = await api(`/api/peers/${action}`, body);
+          await poll();
+          return r || {};
+        } catch (e) {
+          say(e.message, true);
+          return null;
+        } finally {
+          if (btn) btn.disabled = false;
+        }
+      };
+      const connect = async (address, btn) => {
+        const r = await run("connect", { address }, btn);
+        if (r) say(`Запрос отправлен на «${r.name}». Там нажмите «Разрешить», если показан код ${r.code}.`);
+      };
+      node.addEventListener("click", async (e) => {
+        const b = e.target.closest("[data-peer]");
+        if (!b) return;
+        const { peer: action, id, address } = b.dataset;
+        if (action === "lan") { await act("/api/config", { lan: true }); return; }
+        if (action === "connect") { connect(address, b); return; }
+        if (action === "remove" && !confirm("Отключить этот компьютер? Задачи между ними больше не будут отправляться.")) return;
+        const r = await run(action, { id }, b);
+        if (r && action === "accept") say(`«${r.name}» подключён: выберите задачу и нажмите «Отправить».`);
+      });
+      const addr = node.querySelector("#peer-addr");
+      const add = node.querySelector("#peer-add");
+      add?.addEventListener("click", () => connect(addr.value, add));
+      addr?.addEventListener("keydown", (e) => { if (e.key === "Enter") connect(addr.value, add); });
+      node.querySelector("#peer-name-save")?.addEventListener("click", async (e) => {
+        const name = node.querySelector("#peer-name").value.trim();
+        if (await run("settings", { name }, e.target)) say("Имя сохранено: под ним этот компьютер видят другие.");
+      });
+      node.querySelector("#peer-auto")?.addEventListener("change", (e) => run("settings", { auto: e.target.checked }));
+    });
+  },
+  "send-to-peer"() {
+    const todo = selected?.type === "todo" && data.todos.find((t) => t.id === selected.id);
+    const peers = data.link?.peers || [];
+    if (!todo || todo.done_at || !peers.length) return;
+    dialog("Отправить задачу", `<div class="msg"><img src="${icon("network_normal_two_pcs-0")}" alt=""><div>
+      <p>${todoText(todo)}${todo.task ? `: ${esc(todo.task)}` : ""}</p>
+      <p>На какой компьютер отправить? Там задача появится в «Нужно сделать» с уведомлением, а здесь закроется с пометкой, куда ушла.</p>
+      <p id="send-error" class="bad"></p></div></div>
+      <div class="buttons wrap">${peers.map((p, i) => `<button data-send="${i}"${i ? "" : ' class="default"'}>«${esc(p.name)}»${p.online === false ? " — не в сети" : ""}</button>`).join("")}<button data-close>Отмена</button></div>`,
+    (node, close) => {
+      const buttons = [...node.querySelectorAll("[data-send]")];
+      node.addEventListener("click", async (e) => {
+        const b = e.target.closest("[data-send]");
+        if (!b) return;
+        buttons.forEach((x) => { x.disabled = true; });
+        try {
+          await api("/api/peers/send", { peer: peers[Number(b.dataset.send)].id, todos: [todo.id] });
+          close();
+          await poll();
+        } catch (err) {
+          node.querySelector("#send-error").textContent = `Не отправилось: ${err.message}`;
+          buttons.forEach((x) => { x.disabled = false; });
+        }
+      });
+    });
+  },
   "toggle-autostart"() { act("/api/config", { autostart: !data.config.autostart }); },
   async "phone-notify"() {
     const st = (await AD_HOST.watch.status().catch(() => null)) || {};
@@ -796,7 +942,8 @@ const ACTIONS = {
     const isTodo = selected.type === "todo";
     const head = isTodo
       ? `${kv("Задача", item.task)}${kv("Кому переслать", item.to)}${kv("Заметка", item.note)}${kv("Результат", item.result)}
-         ${kv("message_id", item.kind === "forward" && item.message_id)}${kv("Переслано", when(item.forwarded_at))}${kv("Подтверждено", when(item.acked_at))}`
+         ${kv("message_id", item.kind === "forward" && item.message_id)}${kv("Переслано", when(item.forwarded_at))}${kv("Подтверждено", when(item.acked_at))}
+         ${kv("Пришло с компьютера", item.from_device?.name)}${kv("Отправлено на", item.sent_to && `«${item.sent_to.name}», ${when(item.sent_to.at)}${item.sent_to.auto ? " (само)" : ""}`)}${kv("Не отправилось", !item.done_at && item.send_error)}`
       : `${kv("Состояние", stateLabel(item))}${kv("Этап", item.phase)}${kv("Задача", item.task)}${kv("Кому переслать", item.to)}
          ${kv("Заметка", item.note)}${kv("Результат", item.result)}${kv("Сессия", item.session)}${kv("Обновлено", when(item.updated))}`;
     const msg = isTodo && item.message ? `<p>Текст для пересылки:</p><textarea readonly class="msg-text"></textarea>` : "";
@@ -1050,6 +1197,9 @@ window.abFocus = (proj, todoId) => {
   render();
   document.querySelector(`tr[data-todo="${todoId}"]`)?.scrollIntoView({ block: "nearest" });
 };
+
+// Called by the desktop app for a popup about another computer (a pairing request, a new pair).
+window.abPeers = () => { if (data && !document.querySelector("#peers-live")) ACTIONS.peers(); };
 
 AD_HOST.onNotificationTap((proj, todoId) => window.abFocus(proj, todoId));
 document.addEventListener("visibilitychange", () => {

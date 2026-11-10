@@ -270,10 +270,14 @@ function nameMap(value, valueIsList) {
 
 // --- desk -------------------------------------------------------------------------
 
+const { PeerLink } = require("./peers.js"); // PC <-> laptop: reminders between desks of one Wi-Fi
+
+const REMINDER_KINDS = new Set(["forward", "reply", "blocked", "limit"]);
+
 // Win98 icon (web/icons/<name>.png, 32x32) of each alert kind: PC popup, phone notification.
 const ALERT_ICON = {
   forward: "envelope_closed-0", reply: "msg_question-0", blocked: "msg_error-0", limit: "msg_warning-0",
-  done: "check-0", bad: "msg_error-0",
+  done: "check-0", bad: "msg_error-0", peer: "network_normal_two_pcs-0",
 };
 
 class Desk extends EventEmitter {
@@ -284,6 +288,7 @@ class Desk extends EventEmitter {
    * @param {number} [o.port]      overrides config.port without saving it (0 = any free port)
    * @param {boolean} [o.lan]      overrides config.lan without saving it
    * @param {string|null} [o.legacyDir] Agent Board data to import on first run (default ~/AgentBoard, null = off)
+   * @param {boolean} [o.discovery] find other Agent Desks of the Wi-Fi by UDP broadcast (the desktop app)
    */
   constructor(o = {}) {
     super();
@@ -309,6 +314,7 @@ class Desk extends EventEmitter {
     this._load();
     this.port = o.port ?? this.config.port;
     this.lanOverride = o.lan;
+    this.peers = new PeerLink(this, { discovery: o.discovery });
   }
 
   _load() {
@@ -330,6 +336,7 @@ class Desk extends EventEmitter {
     c.agents = nameMap(c.agents, true);
     c.aliases = nameMap(c.aliases, false);
     c.allowed_hosts = (Array.isArray(c.allowed_hosts) ? c.allowed_hosts : []).map((h) => clean(h, 100).toLowerCase()).filter(Boolean);
+    PeerLink.normalize(c); // device_id, device_name, peers (keys of each pair), peer_auto
 
     this.state = {
       agents: {}, todos: [], events: [], seen_ids: [], alerts: [], rejected: [], next_id: 1, alert_seq: 0,
@@ -470,6 +477,58 @@ class Desk extends EventEmitter {
     this.emit("todo-closed", t);
   }
 
+  /** Popup and phone notification of a reminder: what happened and what to do. */
+  _remind(t, { again = "", body, from = "" } = {}) {
+    const who = `${t.agent} (${t.project})`;
+    const text = {
+      forward: [`${who}: переслать → ${t.to}${again}`, `Перешлите результат агенту ${t.to}`],
+      reply: [`${who} ждёт вашего ответа`, `Ответьте агенту ${t.agent}: он ждёт вашего решения`],
+      blocked: [`${who} заблокирован`, `Помогите агенту ${t.agent}: он не может продолжить`],
+      limit: [`${who}: закончился лимит модели`, `Начните новую сессию или смените модель для ${t.agent}`],
+    }[t.kind];
+    if (!text) return;
+    const title = from ? `С «${from}»: ${text[0]}` : text[0];
+    this._alert(t.kind, t.project, title, body ?? (t.task || t.note), t.id, { agent: t.agent, to: t.to, action: text[1] });
+  }
+
+  /** {project: [agent names]} known here, "*" = agents of every project: other desks route by it. */
+  agentDirectory() {
+    const c = this.config;
+    const projects = new Set([...Object.values(this.state.agents).map((a) => a.project), ...c.watch.map((w) => w.project), ...Object.keys(c.agents)]);
+    projects.delete("*");
+    projects.delete("");
+    const out = Object.fromEntries([...projects].map((p) => [p, this.knownAgents(p)]));
+    out["*"] = [...(c.agents["*"] || [])];
+    return out;
+  }
+
+  /** Reminders sent by a paired desk (core/peers.js): new reminders here, with a note where from. */
+  receiveTodos(peer, items) {
+    const now = nowIso();
+    let added = 0;
+    for (const x of items) {
+      if (!x || typeof x !== "object" || !REMINDER_KINDS.has(x.kind)) continue;
+      const ref = oneLine(x.message_id, 40);
+      const origin = `${peer.id}:${ref}`;
+      if (ref && this.state.todos.some((t) => t.origin === origin && !t.done_at)) continue; // sent twice
+      const project = oneLine(x.project, 60);
+      const agent = this.canonical(project, oneLine(x.agent, 60));
+      if (!agent) continue;
+      const ev = {
+        project, agent, to: x.to ? this.canonical(project, oneLine(x.to, 60)) : "", task: oneLine(x.task, 500),
+        note: clean(x.note, 2000), result: clean(x.result, 2000), waiting_for: oneLine(x.waiting_for, 40), ref, received: now,
+      };
+      const t = this._newTodo(x.kind, ev, clean(x.message, 20000) || defaultMessage(ev), { origin, from_device: { id: peer.id, name: peer.name } });
+      this._remind(t, { from: peer.name });
+      added += 1;
+    }
+    if (added) {
+      this._trimTodos();
+      this._commit();
+    }
+    return added;
+  }
+
   _acknowledge(ev) {
     for (const t of this.state.todos) {
       if (t.kind !== "forward" || t.acked_at) continue;
@@ -560,20 +619,10 @@ class Desk extends EventEmitter {
 
     const who = `${ev.agent} (${ev.project})`;
     if (todo && alertTitle) {
-      const again = alertTitle === "resubmitted" ? " — обновлённый результат" : "";
-      const titles = {
-        forward: `${who}: переслать → ${ev.to}${again}`,
-        reply: `${who} ждёт вашего ответа`,
-        blocked: `${who} заблокирован`,
-        limit: `${who}: закончился лимит модели`,
-      };
-      const actions = {
-        forward: `Перешлите результат агенту ${ev.to}`,
-        reply: `Ответьте агенту ${ev.agent}: он ждёт вашего решения`,
-        blocked: `Помогите агенту ${ev.agent}: он не может продолжить`,
-        limit: `Начните новую сессию или смените модель для ${ev.agent}`,
-      };
-      this._alert(kind, ev.project, titles[kind], ev.task || ev.note, todo.id, { agent: ev.agent, to: ev.to, action: actions[kind] });
+      // The addressee works on another desk of this Wi-Fi (config.peer_auto): it goes there, no popup here.
+      const peer = alertTitle !== "updated" ? this.peers.routeFor(todo) : null;
+      if (peer) this.peers.route(todo, peer);
+      else this._remind(todo, { again: alertTitle === "resubmitted" ? " — обновлённый результат" : "", body: ev.task || ev.note });
     } else if (!kind && ev.state === "done") {
       this._alert("done", ev.project, `${who} закончил`, ev.task || ev.result, null, { agent: ev.agent, action: "Проверьте результат и дайте следующую задачу" });
     }
@@ -759,6 +808,7 @@ class Desk extends EventEmitter {
       },
       server_time: nowIso(),
       host: os.hostname(),
+      link: this.peers.payload(),
     };
   }
 
@@ -886,6 +936,7 @@ class Desk extends EventEmitter {
       });
     }
     if (url.pathname === "/api/ping") return this._send(res, 200, { app: "agent-desk", version: VERSION, protocol: PROTOCOL }, cors);
+    if (url.pathname.startsWith("/api/p2p/")) return this._p2p(req, res, url); // another desk: own keys
     const auth = this._auth(req, url);
     if (!auth.ok) {
       if (url.pathname.startsWith("/api/")) return this._send(res, 403, { error: "нет доступа: нужен ключ из «Файл → Подключить телефон»" }, cors);
@@ -925,8 +976,29 @@ class Desk extends EventEmitter {
     } catch (e) {
       return this._send(res, e.status || 400, { error: e.message }, cors);
     }
-    const r = this._post(url.pathname, body, auth);
+    const r = url.pathname.startsWith("/api/peers/")
+      ? await this.peers.local(url.pathname.slice("/api/peers/".length), body && typeof body === "object" ? body : {}, auth)
+      : this._post(url.pathname, body, auth);
     return this._send(res, r.code || 200, r.body || { ok: true }, cors);
+  }
+
+  /** Requests of another Agent Desk of the Wi-Fi (core/peers.js): keys of the pair, no CORS. */
+  async _p2p(req, res, url) {
+    let body = {};
+    if (req.method === "POST") {
+      if (!/^application\/json\b/i.test(req.headers["content-type"] || "") || req.headers["x-agent-desk"] !== "1") {
+        return this._send(res, 403, { error: "нужны Content-Type: application/json и X-Agent-Desk: 1" });
+      }
+      try {
+        body = await readJsonBody(req, LIMITS.body);
+      } catch (e) {
+        return this._send(res, e.status || 400, { error: e.message });
+      }
+    } else if (req.method !== "GET") {
+      return this._send(res, 405, { error: "method not allowed" });
+    }
+    const r = this.peers.p2p(req, url, body && typeof body === "object" && !Array.isArray(body) ? body : {});
+    return this._send(res, r.code || 200, r.body || { ok: true });
   }
 
   /**
@@ -970,7 +1042,7 @@ class Desk extends EventEmitter {
       } else if (parts[3] === "done") {
         this._close(t, now, false);
       } else if (parts[3] === "undo") {
-        Object.assign(t, { done_at: null, forwarded_at: null, acked_at: null, acked_by: null });
+        Object.assign(t, { done_at: null, forwarded_at: null, acked_at: null, acked_by: null, sent_to: null, send_error: null });
       } else {
         return { code: 404, body: { error: "not found" } };
       }
@@ -1086,10 +1158,12 @@ class Desk extends EventEmitter {
     this._saveState();
     this._tick();
     this.timer = setInterval(() => this._tick(), this.pollMs);
+    this.peers.start();
     return this;
   }
 
   async stop() {
+    this.peers.stop();
     clearInterval(this.timer);
     this.timer = null;
     if (this.dirty) {

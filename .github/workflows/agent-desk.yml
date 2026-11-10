@@ -31,6 +31,8 @@ jobs:
         run: node --test --test-reporter=spec core/test/desk.test.js
       - name: Cyrillic pixel font is up to date
         run: node scripts/make-font.js --check
+      - name: Syntax of the window, phone and build scripts
+        run: for f in web/*.js desktop/*.js core/*.js scripts/*.js mobile/scripts/*.js; do node --check "$f" || exit 1; done
 
   windows:
     needs: test
