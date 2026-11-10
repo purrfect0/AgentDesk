@@ -12,8 +12,13 @@ const OUT = path.join(ROOT, "..", ".github", "readme");
 const b64 = (file) => fs.readFileSync(path.join(ROOT, "web", file)).toString("base64");
 const icon = (name) => `data:image/png;base64,${b64(`icons/${name}.png`)}`;
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// Cyrillic and a few signs: the pixel faces of the app (web/fonts/fonts.css, scripts/make-font.js).
+const CYR = fs.readFileSync(path.join(ROOT, "web", "fonts", "fonts.css"), "utf8").split("unicode-range:")[1].split(";")[0].trim();
+const VERSION = require(path.join(ROOT, "package.json")).version.split(".").slice(0, 2).join(".");
 const FONT = `<style>@font-face{font-family:W98;src:url(data:font/woff2;base64,${b64("vendor/ms_sans_serif.woff2")}) format("woff2")}
 @font-face{font-family:W98;font-weight:bold;src:url(data:font/woff2;base64,${b64("vendor/ms_sans_serif_bold.woff2")}) format("woff2")}
+@font-face{font-family:W98;unicode-range:${CYR};src:url(data:font/woff;base64,${b64("fonts/ad-cyrillic.woff")}) format("woff")}
+@font-face{font-family:W98;font-weight:bold;unicode-range:${CYR};src:url(data:font/woff;base64,${b64("fonts/ad-cyrillic-bold.woff")}) format("woff")}
 text{font-family:W98,Tahoma,"MS Sans Serif",sans-serif;font-size:11px}</style>`;
 const svg = (w, h, body) => `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" shape-rendering="crispEdges">${FONT}${body}</svg>\n`;
 const img = (href, x, y, size) => `<image href="${href}" x="${x}" y="${y}" width="${size}" height="${size}" style="image-rendering:pixelated"/>`;
@@ -45,9 +50,9 @@ function header() {
   return svg(W, H, `${raised(0, 0, W, H)}
 ${titleBar(3, 3, W - 6, "Agent Desk", icon("network_normal_two_pcs-1"), "tb")}
 ${img(icon("network_normal_two_pcs-0"), 20, 40, 64)}
-<text x="104" y="58" font-weight="bold" style="font-size:22px">Agent Desk 2.1</text>
+<text x="104" y="58" font-weight="bold" style="font-size:22px">Agent Desk ${VERSION}</text>
 <text x="104" y="80" style="font-size:13px">Табло ИИ-агентов: кто работает, кто ждёт ответа и что нужно переслать.</text>
-<text x="104" y="100" style="font-size:13px" fill="#404040">Windows (.exe) · Android (.apk) · связь по Wi-Fi · MIT</text>
+<text x="104" y="100" style="font-size:13px" fill="#404040">Windows (.exe) · Android (.apk) · ПК, ноутбук и телефон в одной Wi-Fi сети · MIT</text>
 <rect x="6" y="${H - 22}" width="${W - 12}" height="16" fill="#808080"/><rect x="7" y="${H - 21}" width="${W - 13}" height="15" fill="#fff"/><rect x="7" y="${H - 21}" width="${W - 14}" height="14" fill="#c0c0c0"/>
 <text x="12" y="${H - 10}">Готово</text>`);
 }
@@ -75,6 +80,10 @@ const files = {
   "bar-phone.svg": bar("Подключение телефона", "world-1", "b4"),
   "bar-agents.svg": bar("Агентам", "users-0", "b5"),
   "bar-build.svg": bar("Сборка", "application_hourglass-1", "b6"),
+  "bar-look.svg": bar("Как это выглядит", "computer-1", "b7"),
+  "bar-link.svg": bar("Связь ПК и ноутбука", "network_normal_two_pcs-1", "b8"),
+  "bar-notify.svg": bar("Уведомления на телефоне", "envelope_closed-1", "b9"),
+  "bar-new.svg": bar(`Что нового в ${VERSION}`, "check-1", "b10"),
 };
 for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(OUT, name), content);
 console.log(`readme art: ${Object.keys(files).length} files in ${OUT}`);
