@@ -107,8 +107,8 @@ table.interactive > tbody > tr.highlighted td { color: #fff; }
 .dialog [role=tabpanel] > .window-body { margin: 6px; }
 tr.stale td.state { color: #800000; }
 
-/* Accents: what needs the owner blinks like a Win98 taskbar button. The animation-delay set in
-   app.js keeps the phase when the table is redrawn every 2 s, so nothing jumps. */
+/* Accents: what needs the owner blinks like a Win98 taskbar button. The tables are patched in
+   place (patch() in app.js), and the animation-delay set there keeps all blinking icons in phase. */
 tr.attn td.c-ico img { animation: ad-blink 1s steps(1) infinite; }
 tr.attn-forward td.c-ico img { animation: ad-shake 2.4s ease-in-out infinite; }
 tr.attn td.status b, tr.attn td.state { animation: ad-flash 1s steps(1) 8 both; padding: 0 2px; }

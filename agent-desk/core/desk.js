@@ -26,9 +26,12 @@ const LIMITS = {
 const APP_ORIGINS = new Set(["capacitor://localhost", "http://localhost", "https://localhost", "ionic://localhost"]);
 const MIME = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
-  ".png": "image/png", ".ico": "image/x-icon", ".woff": "font/woff", ".woff2": "font/woff2",
-  ".json": "application/json; charset=utf-8", ".svg": "image/svg+xml",
+  ".png": "image/png", ".ico": "image/x-icon", ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf",
+  ".json": "application/json; charset=utf-8", ".svg": "image/svg+xml", ".wav": "audio/wav",
 };
+// Pictures, fonts and sounds may be reused by the page: with no-store every redraw downloaded the
+// icons again and they blinked. The ETag still brings a changed file after an update.
+const REUSABLE = new Set([".png", ".ico", ".svg", ".woff", ".woff2", ".ttf", ".wav"]);
 const CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; "
   + "connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
@@ -803,7 +806,7 @@ class Desk extends EventEmitter {
     res.end(data);
   }
 
-  _static(res, pathname) {
+  _static(res, pathname, req) {
     if (!this.webDir) return this._send(res, 404, "not found");
     let rel;
     try {
@@ -813,14 +816,33 @@ class Desk extends EventEmitter {
     }
     const target = path.resolve(this.webDir, rel);
     if (!target.startsWith(this.webDir + path.sep)) return this._send(res, 404, "not found");
+    let stat;
+    try {
+      stat = fs.statSync(target);
+    } catch {
+      return this._send(res, 404, "not found");
+    }
+    if (!stat.isFile()) return this._send(res, 404, "not found");
+    const ext = path.extname(target).toLowerCase();
+    const type = MIME[ext] || "application/octet-stream";
+    const headers = { "Content-Type": type, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
+    if (REUSABLE.has(ext)) {
+      const etag = `W/"${stat.size.toString(36)}-${Math.floor(stat.mtimeMs).toString(36)}"`;
+      Object.assign(headers, { "Cache-Control": "no-cache", ETag: etag });
+      const known = String(req?.headers["if-none-match"] || "").split(",").map((s) => s.trim());
+      if (known.includes(etag)) {
+        res.writeHead(304, headers);
+        res.end();
+        return;
+      }
+    }
     let data;
     try {
       data = fs.readFileSync(target);
     } catch {
       return this._send(res, 404, "not found");
     }
-    const type = MIME[path.extname(target).toLowerCase()] || "application/octet-stream";
-    const headers = { "Content-Type": type, "Content-Length": data.length, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
+    headers["Content-Length"] = data.length;
     if (type.startsWith("text/html")) Object.assign(headers, { "Content-Security-Policy": CSP, "X-Frame-Options": "DENY" });
     res.writeHead(200, headers);
     res.end(data);
@@ -867,7 +889,7 @@ class Desk extends EventEmitter {
         return auth.local ? this._send(res, 200, this.pairing(), cors) : this._send(res, 403, { error: "только на ПК" }, cors);
       }
       if (url.pathname.startsWith("/api/")) return this._send(res, 404, { error: "not found" }, cors);
-      return this._static(res, url.pathname);
+      return this._static(res, url.pathname, req);
     }
     if (req.method !== "POST") return this._send(res, 405, { error: "method not allowed" }, cors);
     // CSRF: a form or no-cors fetch from a web page cannot send JSON with a custom header.

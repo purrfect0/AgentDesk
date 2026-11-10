@@ -56,6 +56,74 @@ const $ = (sel) => document.querySelector(sel);
 const icon = (name) => `icons/${name}.png`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+// --- in-place redraw ------------------------------------------------------------
+// The tables are redrawn every 2 s. Replacing them through innerHTML recreated every <img>, and
+// the icons blinked while they loaded again. patch() compares the new markup with the page and
+// touches only what changed. Rows are matched by data-key. An element whose data-since changed is
+// replaced, so its accent animation starts over; otherwise its style (the animation phase) stays.
+const tpl = document.createElement("template");
+const ROW_PARENTS = new Set(["TABLE", "TBODY", "THEAD", "TR", "MENU", "UL", "OL"]);
+const isEl = (n) => n.nodeType === Node.ELEMENT_NODE;
+const isBlank = (n) => n.nodeType === Node.TEXT_NODE && !n.nodeValue.trim();
+const keyOf = (n) => (isEl(n) && n.dataset.key) || "";
+
+function patch(parent, html) {
+  tpl.innerHTML = html;
+  patchChildren(parent, tpl.content);
+  tpl.innerHTML = "";
+}
+
+function patchChildren(parent, src) {
+  const rows = ROW_PARENTS.has(parent.nodeName); // whitespace between rows and cells means nothing there
+  const fresh = [...src.childNodes].filter((n) => !(rows && isBlank(n)));
+  const wanted = new Set(fresh.map(keyOf).filter(Boolean));
+  const keyed = new Map();
+  for (const n of [...parent.childNodes]) {
+    const key = keyOf(n);
+    if ((rows && isBlank(n)) || (key && !wanted.has(key))) n.remove();
+    else if (key) keyed.set(key, n);
+  }
+  let at = parent.firstChild;
+  for (const nn of fresh) {
+    const key = keyOf(nn);
+    let old = key ? keyed.get(key) : ((at && !keyOf(at) && at.nodeName === nn.nodeName) ? at : null);
+    if (key) keyed.delete(key);
+    if (old && isEl(old) && old.dataset.since !== nn.dataset.since) {
+      if (old === at) at = at.nextSibling;
+      old.remove();
+      old = null;
+    }
+    if (!old) {
+      parent.insertBefore(nn, at);
+      continue;
+    }
+    if (old === at) at = at.nextSibling;
+    else parent.insertBefore(old, at);
+    patchNode(old, nn);
+  }
+  while (at) {
+    const next = at.nextSibling;
+    at.remove();
+    at = next;
+  }
+}
+
+function patchNode(old, nn) {
+  if (!isEl(old)) {
+    if (old.nodeValue !== nn.nodeValue) old.nodeValue = nn.nodeValue;
+    return;
+  }
+  const keepStyle = "since" in old.dataset; // data-since is the same here, the animation keeps its phase
+  for (const { name, value } of [...nn.attributes]) {
+    if (name === "style" && keepStyle && old.hasAttribute("style")) continue;
+    // The selection belongs to applySelection(); keeping it here stops a selected row from flashing.
+    const v = name === "class" && old.classList.contains("highlighted") ? `${value} highlighted`.trim() : value;
+    if (old.getAttribute(name) !== v) old.setAttribute(name, v);
+  }
+  for (const { name } of [...old.attributes]) if (!nn.hasAttribute(name)) old.removeAttribute(name);
+  if (old.innerHTML !== nn.innerHTML) patchChildren(old, nn);
+}
+
 function ago(iso) {
   const t = Date.parse(iso);
   if (!t) return "";
@@ -105,7 +173,7 @@ function grouped(items, cols, row) {
   if (project !== "*") return items.map(row).join("");
   return allProjects().map((p) => {
     const part = items.filter((x) => x.project === p);
-    return part.length ? `<tr class="group"><td colspan="${cols}">${esc(p)}</td></tr>${part.map(row).join("")}` : "";
+    return part.length ? `<tr class="group" data-key="g:${esc(p)}"><td colspan="${cols}">${esc(p)}</td></tr>${part.map(row).join("")}` : "";
   }).join("");
 }
 
@@ -115,43 +183,54 @@ function render() {
   if (project !== "*" && !projects.includes(project)) project = "*";
   const openIn = (p) => data.todos.filter((t) => needsAction(t) && (p === "*" || t.project === p)).length;
   const newestIn = (p) => data.todos.filter((t) => needsAction(t) && (p === "*" || t.project === p)).map((t) => t.created).sort().pop();
-  const label = (name, n, p) => (n ? `${esc(name)} <b class="attn" style="${accent(newestIn(p))}">(${n})</b>` : esc(name));
-  $("#project-tabs").innerHTML = [["*", "Все проекты"], ...projects.map((p) => [p, p])].map(([id, name]) =>
-    `<li role="tab" data-project="${esc(id)}" aria-selected="${id === project}"><a href="#">${label(name, openIn(id), id)}</a></li>`).join("");
+  const label = (name, n, p) => {
+    if (!n) return esc(name);
+    const since = newestIn(p);
+    return `${esc(name)} <b class="attn" data-since="${esc(since)}" style="${accent(since)}">(${n})</b>`;
+  };
+  patch($("#project-tabs"), [["*", "Все проекты"], ...projects.map((p) => [p, p])].map(([id, name]) =>
+    `<li role="tab" data-key="p:${esc(id)}" data-project="${esc(id)}" aria-selected="${id === project}"><a href="#">${label(name, openIn(id), id)}</a></li>`).join(""));
 
   renderTodos();
 
   const agents = Object.values(data.agents).filter(inProject)
     .sort((a, b) => a.project.localeCompare(b.project) || a.first_seen.localeCompare(b.first_seen));
   const events = data.events.filter(inProject).reverse();
-  $("#tabs").innerHTML = [["agents", "Агенты"], ["log", "Журнал"]].map(([id, name]) =>
-    `<li role="tab" data-tab="${id}" aria-selected="${id === tab}"><a href="#">${name}</a></li>`).join("");
+  patch($("#tabs"), [["agents", "Агенты"], ["log", "Журнал"]].map(([id, name]) =>
+    `<li role="tab" data-key="v:${id}" data-tab="${id}" aria-selected="${id === tab}"><a href="#">${name}</a></li>`).join(""));
 
   const showLog = tab === "log";
   $("#agent-table").classList.toggle("hidden", showLog);
   $("#log-table").classList.toggle("hidden", !showLog);
 
   if (showLog) {
-    $("#log-table tbody").innerHTML = grouped(events, 5, (e) => `
-      <tr><td class="c-ico"><img src="${icon(STATE_ICON[e.state])}" alt=""></td>
+    const seen = new Map(); // two events of one agent in the same millisecond still get their own rows
+    const eventKey = (e) => {
+      const id = `${e.time}|${e.project}|${e.agent}|${e.state}`;
+      seen.set(id, (seen.get(id) || 0) + 1);
+      return `e:${id}#${seen.get(id)}`;
+    };
+    patch($("#log-table tbody"), grouped(events, 5, (e) => `
+      <tr data-key="${esc(eventKey(e))}"><td class="c-ico"><img src="${icon(STATE_ICON[e.state])}" alt=""></td>
       <td class="nowrap">${hhmm(e.time)} <span class="sub">${esc(ago(e.time))}</span></td>
       <td class="nowrap">${esc(e.agent)}</td>
       <td class="nowrap">${esc(stateLabel(e))}${e.to ? ` → ${esc(e.to)}` : ""}${e.ack ? ` (подтвердил ${esc(e.ack)})` : ""}</td>
-      <td class="task opt" title="${esc(e.task)}">${esc(e.task)}</td></tr>`);
+      <td class="task opt" title="${esc(e.task)}">${esc(e.task)}</td></tr>`));
     $("#agents-empty").classList.toggle("hidden", events.length > 0);
   } else {
-    $("#agent-table tbody").innerHTML = grouped(agents, 5, (a) => {
+    patch($("#agent-table tbody"), grouped(agents, 5, (a) => {
       const key = `${a.project}/${a.agent}`;
       const stale = isStale(a);
       const text = esc(stale ? `${stateLabel(a)}? активность не подтверждена ${ago(a.updated)}` : stateLabel(a));
       const attn = stale || agentNeedsYou(a);
-      return `<tr class="${stale ? "stale" : ""}${attn ? " attn" : ""}" data-agent="${esc(key)}"${attn ? ` style="${accent(a.updated)}"` : ""}>
+      const cls = [stale && "stale", attn && "attn"].filter(Boolean).join(" ");
+      return `<tr class="${cls}" data-key="a:${esc(key)}" data-agent="${esc(key)}"${attn ? ` data-since="${esc(a.updated)}" style="${accent(a.updated)}"` : ""}>
         <td class="c-ico"><img src="${icon(stale ? STATE_ICON.stale : STATE_ICON[a.state])}" alt=""></td>
         <td class="nowrap"><b>${esc(a.agent)}</b></td>
         <td class="nowrap state">${text}${a.state === "done" && a.to ? ` → ${esc(a.to)}` : ""}</td>
         <td class="task opt" title="${esc(a.task)}">${esc(a.task)}</td>
         <td class="nowrap">${esc(ago(a.updated))}</td></tr>`;
-    });
+    }));
     $("#agents-empty").classList.toggle("hidden", agents.length > 0);
   }
 
@@ -174,7 +253,8 @@ function render() {
   $("#autostart-check").classList.toggle("on", !!data.config.autostart);
   $("#phone-notify-check").classList.toggle("on", phoneNotify);
   const soundState = isNative ? data.config.popup_sound !== false : soundOn;
-  $("#tb-sound").src = icon(soundState ? "loudspeaker_rays-0" : "loudspeaker_muted-0");
+  const soundIcon = icon(soundState ? "loudspeaker_rays-0" : "loudspeaker_muted-0");
+  if ($("#tb-sound").getAttribute("src") !== soundIcon) $("#tb-sound").src = soundIcon;
   $("#popup-sound-check").classList.toggle("on", data.config.popup_sound !== false);
   applySelection();
 }
@@ -200,19 +280,29 @@ function renderTodos() {
   const open = todos.filter(needsAction).length;
   const name = project === "*" ? "Нужно сделать" : `Нужно сделать — ${project}`;
   const legend = $("#todo-legend");
-  legend.textContent = open ? `${name} (${open})` : name;
-  legend.classList.toggle("attn", open > 0);
-  legend.style.cssText = open ? accent(todos.filter(needsAction).map((t) => t.created).sort().pop()) : "";
-  $("#todo-table tbody").innerHTML = grouped(todos, 4, (t) => {
+  const legendText = open ? `${name} (${open})` : name;
+  if (legend.textContent !== legendText) legend.textContent = legendText;
+  const since = open ? todos.filter(needsAction).map((t) => t.created).sort().pop() : "";
+  if (legend.dataset.since !== since) {
+    // Only a newer reminder restarts the flashing; ordinary redraws leave it running.
+    legend.dataset.since = since;
+    legend.classList.remove("attn");
+    legend.style.cssText = since ? accent(since) : "";
+    if (since) {
+      void legend.offsetWidth; // restart the animation
+      legend.classList.add("attn");
+    }
+  }
+  patch($("#todo-table tbody"), grouped(todos, 4, (t) => {
     const act = needsAction(t);
     const cls = t.done_at ? "closed" : act ? `attn${t.kind === "forward" ? " attn-forward" : ""}` : "pending";
     const ico = t.kind === "forward" && t.forwarded_at ? "envelope_open_sheet-1" : TODO_ICON[t.kind];
-    return `<tr class="${cls}" data-todo="${t.id}"${act ? ` style="${accent(t.created)}"` : ""}>
+    return `<tr class="${cls}" data-key="t:${t.id}" data-todo="${t.id}"${act ? ` data-since="${esc(t.created)}" style="${accent(t.created)}"` : ""}>
       <td class="c-ico"><img src="${icon(ico)}" alt=""></td>
       <td>${todoText(t)}${t.task ? `: <span class="sub">${esc(t.task)}</span>` : ""}</td>
       <td class="nowrap status">${todoStatus(t)}</td>
       <td class="nowrap opt">${esc(ago(t.created))}</td></tr>`;
-  });
+  }));
   $("#todo-table").classList.toggle("hidden", todos.length === 0);
   $("#todo-empty").classList.toggle("hidden", todos.length > 0);
 }
