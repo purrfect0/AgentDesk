@@ -1,8 +1,8 @@
 "use strict";
 /**
  * Agent Desk core: watches marker folders, keeps agent statuses and reminders,
- * serves the UI and the HTTP API. Used by the desktop app (Electron) and by
- * `node core/cli.js` (server only). Plain Node.js, no dependencies.
+ * serves the UI and the HTTP API, including the installed CLI/MCP agent interface.
+ * The core runs in the desktop app (Electron). Marker watching uses plain Node.js.
  */
 const fs = require("node:fs");
 const path = require("node:path");
@@ -10,9 +10,10 @@ const http = require("node:http");
 const os = require("node:os");
 const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
+const { SyncJournal, stableId, UUID } = require("./sync.js");
 
-const VERSION = "2.2.0"; // the app version, the same as in package.json (a test checks it)
-const PROTOCOL = 2;
+const VERSION = "2.3.0"; // the app version, the same as in package.json (a test checks it)
+const PROTOCOL = 3;
 const STATES = new Set(["working", "waiting", "done", "blocked", "idle"]);
 const WAITING_FOR = new Set([
   "owner_input", "owner_forward", "reviewer", "coordinator_review", "resource", "model_limit", "assignment",
@@ -177,6 +178,13 @@ function parseMarker(text, folderProject, now = Date.now()) {
     session: clean(data.session_id, 80),
     seq,
     event_id: clean(data.event_id, 120),
+    task_id: clean(data.task_id, 80),
+    project_id: clean(data.project_id, 80),
+    device_id: clean(data.device_id, 80),
+    execution_state: clean(data.execution_state, 30),
+    assignment_epoch: data.assignment_epoch,
+    artifacts: data.artifacts,
+    checkpoint: data.checkpoint,
     agent_time: agentTime,
     time: plausible ? new Date(t).toISOString() : received,
     received,
@@ -187,6 +195,8 @@ function parseMarker(text, folderProject, now = Date.now()) {
   if (ev.waiting_for && !WAITING_FOR.has(ev.waiting_for)) {
     throw new Error(`waiting_for должен быть одним из: ${[...WAITING_FOR].join(", ")}`);
   }
+  for (const field of ["task_id", "project_id"]) if (ev[field] && !UUID.test(ev[field])) throw new Error(`${field} должен быть UUID`);
+  if (ev.execution_state && !["assigned", "working", "submitted", "accepted", "rework", "blocked"].includes(ev.execution_state)) throw new Error("неверное execution_state");
   return ev;
 }
 
@@ -315,6 +325,23 @@ class Desk extends EventEmitter {
     this.port = o.port ?? this.config.port;
     this.lanOverride = o.lan;
     this.peers = new PeerLink(this, { discovery: o.discovery });
+    this.sync = new SyncJournal(this);
+    const { TaskService } = require("./tasks.js");
+    const { MailStore } = require("./mail.js");
+    this.tasks = new TaskService(this);
+    // Conservative, in-memory-only migration: never infer that an old reminder was accepted.
+    for (const t of this.state.todos) if (!t.task_id && t.task) {
+      t.task_id = stableId(`legacy-task:${t.message_id}`);
+      this.state.tasks[t.task_id] ??= {
+        task_id: t.task_id, project_id: t.project_id, project: t.project, title: t.task,
+        state: t.kind === "blocked" ? "blocked" : "assigned", coordinator_device_id: t.origin_device_id,
+        assignment: { agent: t.to || t.agent, device_id: this.config.device_id, session_id: "", epoch: 1, role: "legacy", adapter: "manual" },
+        checkpoint: { next_step: "Сверьте прежний отчёт и явно назначьте текущую сессию." }, artifacts: [], history: [],
+        managed_assignment: false, created: t.created, updated: t.updated,
+        launch: { status: "needs_manual_launch", adapter: "manual", reason: "Старая запись: устройство/сессию исполнителя нужно подтвердить." },
+      };
+    }
+    this.mail = new MailStore(this);
   }
 
   _load() {
@@ -330,6 +357,7 @@ class Desk extends EventEmitter {
     };
     const c = this.config;
     if (!isStrongKey(c.key)) c.key = newKey(); // old 48-bit Agent Board keys are replaced
+    if (!isStrongKey(c.agent_key)) c.agent_key = newKey(); // separate loopback-only agent API credential
     c.watch = (Array.isArray(c.watch) ? c.watch : [])
       .filter((w) => w && typeof w === "object" && clean(w.path))
       .map((w) => ({ path: clean(w.path, 400), project: oneLine(w.project, 60) }));
@@ -351,6 +379,13 @@ class Desk extends EventEmitter {
       t.done_at ??= null;
       t.message ??= "";
       t.message_id ??= `AB-${t.id}`;
+      t.display_id ??= /^A[BD]-\d+$/i.test(t.message_id) ? t.message_id : `AD-${t.id}`;
+      t.origin_device_id ??= this.config.device_id;
+      if (!UUID.test(t.message_id)) {
+        t.legacy_message_id = t.message_id;
+        t.message_id = stableId(`legacy:${t.origin_device_id}:${t.message_id}`);
+      }
+      t.project_id ||= stableId(`project:${compact(t.project)}`);
       t.updated ??= t.created;
     }
     const maxId = s.todos.reduce((m, t) => Math.max(m, Number(t.id) || 0), 0);
@@ -399,6 +434,7 @@ class Desk extends EventEmitter {
   }
 
   _saveState() {
+    this.sync?.capture();
     this._bump();
     try {
       this._writeState();
@@ -502,47 +538,63 @@ class Desk extends EventEmitter {
     return out;
   }
 
-  /** Reminders sent by a paired desk (core/peers.js): new reminders here, with a note where from. */
   receiveTodos(peer, items) {
-    const now = nowIso();
+    if (!Array.isArray(items) || items.length > 20) throw Object.assign(new Error("неверная пачка напоминаний"), { status: 400 });
+    const before = JSON.parse(JSON.stringify(this.state));
+    const now = nowIso(), notices = [];
     let added = 0;
-    for (const x of items) {
-      if (!x || typeof x !== "object" || !REMINDER_KINDS.has(x.kind)) continue;
-      const ref = oneLine(x.message_id, 40);
-      const origin = `${peer.id}:${ref}`;
-      if (ref && this.state.todos.some((t) => t.origin === origin && !t.done_at)) continue; // sent twice
-      const project = oneLine(x.project, 60);
-      const agent = this.canonical(project, oneLine(x.agent, 60));
-      if (!agent) continue;
-      const ev = {
-        project, agent, to: x.to ? this.canonical(project, oneLine(x.to, 60)) : "", task: oneLine(x.task, 500),
-        note: clean(x.note, 2000), result: clean(x.result, 2000), waiting_for: oneLine(x.waiting_for, 40), ref, received: now,
-      };
-      const t = this._newTodo(x.kind, ev, clean(x.message, 20000) || defaultMessage(ev), { origin, from_device: { id: peer.id, name: peer.name } });
-      this._remind(t, { from: peer.name });
-      added += 1;
-    }
-    if (added) {
-      this._trimTodos();
-      this._commit();
-    }
+    this.state.imported_ids ??= {};
+    try {
+      for (const x of items) {
+        if (!x || typeof x !== "object" || !REMINDER_KINDS.has(x.kind) || !x.project || !x.agent || !x.message_id) {
+          throw Object.assign(new Error("напоминание должно содержать kind/project/agent/message_id"), { status: 400 });
+        }
+        const ref = oneLine(x.message_id, 80), origin = `${peer.id}:${ref}`;
+        const sharedId = UUID.test(ref) ? ref.toLowerCase() : stableId(`legacy:${peer.id}:${ref}`);
+        if (this.state.imported_ids[origin] || this.state.todos.some(t => t.message_id === sharedId || t.origin === origin)) continue;
+        const project = oneLine(x.project, 60), agent = this.canonical(project, oneLine(x.agent, 60));
+        const ev = { project, agent, to: x.to ? this.canonical(project, oneLine(x.to, 60)) : "", task: oneLine(x.task, 500),
+          note: clean(x.note, 2000), result: clean(x.result, 2000), waiting_for: oneLine(x.waiting_for, 40), ref, received: now,
+          task_id: UUID.test(x.task_id || "") ? x.task_id : "", project_id: UUID.test(x.project_id || "") ? x.project_id : stableId(`project:${compact(project)}`) };
+        const t = this._newTodo(x.kind, ev, clean(x.message, 20000) || defaultMessage(ev), {
+          message_id: sharedId, origin, origin_device_id: x.origin_device_id || peer.id,
+          from_device: { id: peer.id, name: peer.name }, created: x.created || now,
+        });
+        this.state.imported_ids[origin] = sharedId; notices.push(t); added++;
+      }
+      this._saveState(); // Fail rather than acknowledging an in-memory-only import.
+    } catch (e) { this.state = before; throw e; }
+    for (const t of notices) this._remind(t, { from: peer.name });
+    if (added) this.emit("change");
     return added;
   }
 
   _acknowledge(ev) {
+    let count = 0;
     for (const t of this.state.todos) {
-      if (t.kind !== "forward" || t.acked_at) continue;
-      // An explicit ack is unique (AD-n) and closes the reminder whoever sends it.
-      const explicit = ev.ack.includes(String(t.message_id).toUpperCase());
-      // Implicit ack: the addressee starts working on the same task after the owner forwarded it.
-      const implicit = !ev.ack.length && ev.state === "working" && t.forwarded_at && !t.done_at && ev.task
-        && ev.task === t.task && t.project === ev.project && this._sameAgent(t.to, ev.agent);
+      if (t.kind !== "forward" || t.acked_at || t.project !== ev.project || !this._sameAgent(t.to, ev.agent)) continue;
+      const task = t.task_id && this.state.tasks?.[t.task_id];
+      const session = task?.assignment?.session_id;
+      if (session && session !== ev.session) continue;
+      if (ev.task_id && t.task_id && ev.task_id !== t.task_id) continue;
+      // Legacy display IDs are accepted only for unambiguous messages created on this desk.
+      const localLegacy = t.origin_device_id === this.config.device_id && !t.from_device
+        && ev.ack.includes(String(t.legacy_message_id || t.display_id || "").toUpperCase());
+      const explicit = ev.ack.includes(String(t.message_id).toUpperCase()) || localLegacy;
+      const implicit = !ev.ack.length && ev.state === "working" && t.forwarded_at && !t.done_at && ev.task && ev.task === t.task;
       if (!explicit && !implicit) continue;
-      t.acked_at = ev.received;
-      t.acked_by = ev.agent;
-      t.forwarded_at ||= ev.received;
-      this._close(t, ev.received, true);
+      t.acked_at = ev.received; t.acked_by = ev.agent; t.forwarded_at ||= ev.received;
+      this._close(t, ev.received, true); count++;
     }
+    return count;
+  }
+
+  _projectIdentity(project, taskId) {
+    const task = taskId && this.state.tasks?.[taskId];
+    if (task && task.project === project) return task.project_id;
+    const ids = [...new Set(Object.values(this.state.tasks || {}).filter(t => t.project === project && UUID.test(t.project_id || "")).map(t => t.project_id))];
+    if (ids.length > 1) throw Object.assign(new Error("неоднозначный проект: укажите project_id"), { status: 409 });
+    return ids[0] || stableId(`project:${compact(project)}`);
   }
 
   _newTodo(kind, ev, message, extra = {}) {
@@ -550,8 +602,10 @@ class Desk extends EventEmitter {
     const id = s.next_id++;
     const t = {
       id, kind, project: ev.project, agent: ev.agent, to: ev.to, task: ev.task, note: ev.note, result: ev.result,
-      waiting_for: ev.waiting_for, message, message_id: `AD-${id}`, ref: ev.ref, created: ev.received, updated: ev.received,
-      forwarded_at: null, acked_at: null, done_at: null, auto: false, ...extra,
+      waiting_for: ev.waiting_for, message, message_id: crypto.randomUUID(), display_id: `AD-${id}`,
+      task_id: ev.task_id || "", project_id: ev.project_id || stableId(`project:${compact(ev.project)}`), origin_device_id: this.config.device_id,
+      ref: ev.ref, created: ev.received, updated: ev.received,
+      forwarded_at: null, acked_at: null, done_at: null, receipt_epoch: 0, auto: false, ...extra,
     };
     if (kind === "forward" && !this.knownAgents(ev.project).some((n) => this._sameAgent(n, ev.to))) {
       t.warning = `Адресат «${ev.to}» не знаком доске в проекте ${ev.project}: проверьте имя.`;
@@ -571,13 +625,18 @@ class Desk extends EventEmitter {
     s.events.push(stored);
     if (s.events.length > LIMITS.events) s.events.splice(0, s.events.length - LIMITS.events);
 
-    this._acknowledge(ev);
-
     if (ev.session && ev.seq !== null && agent.session === ev.session && agent.seq !== null && agent.seq !== undefined && ev.seq <= agent.seq) {
-      stored.stale = true; // an older marker of the same session arrived late
+      stored.stale = true; // an older marker cannot acknowledge a newer assignment
       return;
     }
+    this._acknowledge(ev);
+    ev.device_id = this.config.device_id;
+    ev.project_id ||= this._projectIdentity(ev.project, ev.task_id);
+    const task = this.tasks?.observe(ev);
+    if (task?.task_id) ev.task_id = task.task_id;
     for (const k of ["state", "waiting_for", "phase", "task", "to", "from", "note", "result", "session", "seq"]) agent[k] = ev[k];
+    agent.device_id = this.config.device_id;
+    agent.task_id = ev.task_id;
     agent.updated = ev.time;
     agent.received = ev.received;
     s.agents[key] = agent;
@@ -723,8 +782,13 @@ class Desk extends EventEmitter {
         this.pending.delete(f);
         const id = ev.event_id || `sha:${sha256(raw)}`;
         if (!this.seen.has(id)) {
-          this._remember(id);
-          this.applyEvent(ev);
+          const before = JSON.parse(JSON.stringify(this.state));
+          try { this.applyEvent(ev); this._remember(id); }
+          catch (e) {
+            this.state = before;
+            this._reject(f, w.path, w.project, e.message);
+            changed = true; continue;
+          }
           this.dirty = true;
           changed = true;
         }
@@ -779,6 +843,7 @@ class Desk extends EventEmitter {
   _tick() {
     try {
       this.scanOnce();
+      if (this.mail?.scan()) this._saveState();
       this._cleanup();
     } catch (e) {
       this.log("scan failed:", e.stack || e.message);
@@ -794,7 +859,10 @@ class Desk extends EventEmitter {
     return {
       version: s.version,
       app: { name: "Agent Desk", version: VERSION, protocol: PROTOCOL },
-      agents: s.agents,
+      agents: { ...s.agents, ...Object.fromEntries(Object.entries(s.remote_agents || {}).map(([k, a]) => [`remote:${k}`, a])) },
+      device_id: c.device_id,
+      tasks: this.tasks.list(), bindings: Object.values(s.bindings || {}),
+      mail: this.mail.payload(),
       todos: s.todos.map((t) => ({ ...t, forward_text: forwardText(t) })),
       events: s.events.slice(-LIMITS.payloadEvents).map(({ message, ...e }) => e),
       rejected: s.rejected.slice(-20),
@@ -805,6 +873,7 @@ class Desk extends EventEmitter {
       config: {
         stale_minutes: c.stale_minutes, notify: c.notify, watch: c.watch, lan: c.lan, popup_sound: c.popup_sound,
         popup_volume: c.popup_volume, autostart: c.autostart, retention_days: c.retention_days, agents: c.agents, aliases: c.aliases,
+        task_repo_roots: c.task_repo_roots || [], task_skill_roots: c.task_skill_roots || [],
       },
       server_time: nowIso(),
       host: os.hostname(),
@@ -937,6 +1006,7 @@ class Desk extends EventEmitter {
     }
     if (url.pathname === "/api/ping") return this._send(res, 200, { app: "agent-desk", version: VERSION, protocol: PROTOCOL }, cors);
     if (url.pathname.startsWith("/api/p2p/")) return this._p2p(req, res, url); // another desk: own keys
+    if (url.pathname.startsWith("/api/agent/")) return this._agent(req, res, url, cors);
     const auth = this._auth(req, url);
     if (!auth.ok) {
       if (url.pathname.startsWith("/api/")) return this._send(res, 403, { error: "нет доступа: нужен ключ из «Файл → Подключить телефон»" }, cors);
@@ -960,6 +1030,11 @@ class Desk extends EventEmitter {
         return a ? this._send(res, 200, a, cors) : this._send(res, 404, { error: "not found" }, cors);
       }
       if (url.pathname === "/api/alerts") return this._waitAlerts(res, url, cors);
+      if (url.pathname === "/api/mail") return this._send(res, 200, this.mail.payload(), cors);
+      if (url.pathname === "/api/tasks/context") {
+        try { return this._send(res, 200, this.tasks.context(url.searchParams.get("id")), cors); }
+        catch (e) { return this._send(res, e.status || 400, { error: e.message }, cors); }
+      }
       if (url.pathname === "/api/pairing") {
         return auth.local ? this._send(res, 200, this.pairing(), cors) : this._send(res, 403, { error: "только на ПК" }, cors);
       }
@@ -997,8 +1072,10 @@ class Desk extends EventEmitter {
     } else if (req.method !== "GET") {
       return this._send(res, 405, { error: "method not allowed" });
     }
-    const r = this.peers.p2p(req, url, body && typeof body === "object" && !Array.isArray(body) ? body : {});
-    return this._send(res, r.code || 200, r.body || { ok: true });
+    try {
+      const r = await this.peers.p2p(req, url, body && typeof body === "object" && !Array.isArray(body) ? body : {});
+      return this._send(res, r.code || 200, r.body || { ok: true });
+    } catch (e) { return this._send(res, e.status || 500, { error: e.status ? e.message : "не удалось долговечно сохранить синхронизацию" }); }
   }
 
   /**
@@ -1030,7 +1107,88 @@ class Desk extends EventEmitter {
     res.on("close", forget);
   }
 
+  async _agent(req, res, url, cors) {
+    const remote = req.socket.remoteAddress || "";
+    const loopback = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remote);
+    if (!loopback || req.headers.origin || req.headers["sec-fetch-site"] === "cross-site"
+      || !safeEqual(req.headers["x-agent-desk-agent-key"] || "", this.config.agent_key)) {
+      return this._send(res, 403, { error: "нужен локальный ключ Agent API" }, cors);
+    }
+    const route = url.pathname.slice("/api/agent/".length);
+    try {
+      if (req.method === "GET") {
+        const project = url.searchParams.get("project") || "", agent = url.searchParams.get("agent") || "";
+        const tasks = this.tasks.list({ project, agent });
+        if (route === "inbox") return this._send(res, 200, {
+          device_id: this.config.device_id, tasks,
+          todos: this.state.todos.filter(t => !t.acked_at && !t.done_at && (!project || t.project === project) && (!agent || this._sameAgent(t.to, agent)))
+            .map(t => ({ ...t, forward_text: forwardText(t) })),
+        }, cors);
+        if (route === "status") return this._send(res, 200, { tasks, bindings: Object.values(this.state.bindings || {}), device_id: this.config.device_id }, cors);
+        if (route === "context") return this._send(res, 200, this.tasks.context(url.searchParams.get("id")), cors);
+        if (route === "read") {
+          const id = url.searchParams.get("id"), todo = this.state.todos.find(t => t.message_id === id || t.display_id === id);
+          const task = this.state.tasks?.[id] || (todo && this.state.tasks?.[todo.task_id]);
+          return this._send(res, todo || task ? 200 : 404, todo || task ? { todo, task } : { error: "сообщение/задача не найдены" }, cors);
+        }
+        return this._send(res, 404, { error: "not found" }, cors);
+      }
+      if (req.method !== "POST") return this._send(res, 405, { error: "method not allowed" }, cors);
+      if (req.headers["x-agent-desk"] !== "1" || !/^application\/json\b/i.test(req.headers["content-type"] || "")) return this._send(res, 415, { error: "нужен JSON и X-Agent-Desk" }, cors);
+      const body = await readJsonBody(req, LIMITS.body);
+      if (route.startsWith("task/")) {
+        const action = route.slice(5);
+        if (!["assign", "transition", "handoff"].includes(action)) return this._send(res, 404, { error: "not found" }, cors);
+        if (action === "assign" && !body.task_id && !body.id && body.project && !body.project_id) body.project_id = this._projectIdentity(body.project);
+        return this._send(res, 200, this.tasks[action](body), cors);
+      }
+      const before = JSON.parse(JSON.stringify(this.state)), beforeSeen = new Set(this.seen);
+      try {
+        if (route === "ack") {
+          if (!body.agent || !body.project || !body.message_id) throw Object.assign(new Error("agent/project/message_id обязательны"), { status: 400 });
+          const ev = parseMarker(JSON.stringify({ ...body, state: "idle", ack: body.message_id }), body.project);
+          const t = this.state.todos.find(t => t.message_id.toUpperCase() === String(body.message_id).toUpperCase()
+            || (t.origin_device_id === this.config.device_id && !t.from_device && t.display_id === body.message_id));
+          if (!t) throw Object.assign(new Error("сообщение не найдено"), { status: 404 });
+          if (t.project !== ev.project || !this._sameAgent(t.to, ev.agent)) throw Object.assign(new Error("ACK не соответствует проекту/адресату"), { status: 403 });
+          const task = t.task_id && this.state.tasks[t.task_id];
+          if (task?.assignment?.session_id && task.assignment.session_id !== ev.session) throw Object.assign(new Error("ACK из другой сессии"), { status: 409 });
+          if (!t.acked_at && !this._acknowledge(ev)) throw Object.assign(new Error("ACK не соответствует назначению"), { status: 409 });
+          this._saveState(); this.emit("change");
+          return this._send(res, 200, { ok: true, message_id: t.message_id, acked_at: t.acked_at }, cors);
+        }
+        if (route === "submit") {
+          if (!body.agent || !body.state) throw Object.assign(new Error("agent и state обязательны"), { status: 400 });
+          const ev = parseMarker(JSON.stringify(body), body.project);
+          ev.event_id ||= crypto.randomUUID();
+          if (this.seen.has(ev.event_id)) return this._send(res, 200, { ok: true, event_id: ev.event_id, duplicate: true }, cors);
+          this.applyEvent(ev); this._remember(ev.event_id); this._saveState(); this.emit("change");
+          const todo = this.state.todos.findLast(t => t.task_id === ev.task_id);
+          return this._send(res, 200, { ok: true, event_id: ev.event_id, task_id: ev.task_id, message_id: todo?.message_id }, cors);
+        }
+        return this._send(res, 404, { error: "not found" }, cors);
+      } catch (e) { this.state = before; this.seen = beforeSeen; throw e; }
+    } catch (e) { return this._send(res, e.status || 400, { error: e.message }, cors); }
+  }
+
   _post(pathname, body, auth) {
+    if (pathname.startsWith("/api/tasks/")) {
+      const action = pathname.slice("/api/tasks/".length);
+      if (!["assign", "transition", "handoff"].includes(action)) return { code: 404, body: { error: "not found" } };
+      if (action === "assign" && !body.task_id && !body.id && body.project && !body.project_id) body.project_id = this._projectIdentity(body.project);
+      try { return { body: this.tasks[action](body) }; }
+      catch (e) { return { code: e.status || 400, body: { error: e.message } }; }
+    }
+    if (pathname === "/api/mail/config") {
+      if (!auth.local) return { code: 403, body: { error: "папки почты меняются только на ПК" } };
+      if (!Array.isArray(body.roots) || body.roots.length > 20) return { code: 400, body: { error: "roots должен быть списком до 20 папок" } };
+      for (const r of body.roots) {
+        if (!r || !r.project || !path.isAbsolute(r.path || "") || !fs.existsSync(r.path) || !fs.lstatSync(r.path).isDirectory() || fs.lstatSync(r.path).isSymbolicLink()) return { code: 400, body: { error: "нужны проект и существующая обычная папка" } };
+      }
+      this.config.mail_roots = body.roots.map(r => ({ project: oneLine(r.project,60), path: r.path }));
+      this._saveConfig(); this.mail.scan(); this._saveState(); this.emit("change");
+      return { body: this.mail.payload() };
+    }
     const s = this.state;
     const parts = pathname.split("/").filter(Boolean);
     if (parts.length === 4 && parts[0] === "api" && parts[1] === "todo") {
@@ -1042,7 +1200,7 @@ class Desk extends EventEmitter {
       } else if (parts[3] === "done") {
         this._close(t, now, false);
       } else if (parts[3] === "undo") {
-        Object.assign(t, { done_at: null, forwarded_at: null, acked_at: null, acked_by: null, sent_to: null, send_error: null });
+        Object.assign(t, { done_at: null, forwarded_at: null, acked_at: null, acked_by: null, sent_to: null, send_error: null, receipt_epoch: (t.receipt_epoch || 0) + 1 });
       } else {
         return { code: 404, body: { error: "not found" } };
       }
@@ -1083,7 +1241,7 @@ class Desk extends EventEmitter {
 
   _updateConfig(body, auth) {
     const c = this.config;
-    const admin = ["watch", "lan", "agents", "aliases", "allowed_hosts", "retention_days"].filter((k) => k in body);
+    const admin = ["watch", "lan", "agents", "aliases", "allowed_hosts", "retention_days", "task_repo_roots", "task_skill_roots"].filter((k) => k in body);
     if (admin.length && !auth.local) return { code: 403, body: { error: `эти настройки меняются только на ПК: ${admin.join(", ")}` } };
     let watch = null;
     if ("watch" in body) {
@@ -1103,6 +1261,12 @@ class Desk extends EventEmitter {
       }
       if (errors.length) return { code: 400, body: { error: errors.join("; ") } };
     }
+    for (const key of ["task_repo_roots", "task_skill_roots"]) {
+      if (!(key in body)) continue;
+      const roots = body[key];
+      if (!Array.isArray(roots) || roots.length > 20 || roots.some(p => typeof p !== "string" || !path.isAbsolute(p) || !fs.existsSync(p) || !fs.lstatSync(p).isDirectory() || fs.lstatSync(p).isSymbolicLink())) return { code: 400, body: { error: `${key}: нужны существующие обычные папки (до 20)` } };
+    }
+    for (const key of ["task_repo_roots", "task_skill_roots"]) if (key in body) c[key] = [...new Set(body[key])];
     for (const k of ["notify", "popup_sound", "autostart", "lan"]) if (typeof body[k] === "boolean") c[k] = body[k];
     const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
     if (int(body.popup_volume, 0, 100)) c.popup_volume = body.popup_volume;

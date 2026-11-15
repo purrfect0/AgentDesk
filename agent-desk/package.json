@@ -1,7 +1,7 @@
 {
   "name": "agent-desk",
   "productName": "Agent Desk",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Кто из ИИ-агентов работает, кто ждёт ответа и что нужно переслать",
   "author": "jayleywesa",
   "license": "MIT",
@@ -11,15 +11,15 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test --test-reporter=spec core/test/desk.test.js",
+    "test": "node --test --test-reporter=spec core/test/*.test.js",
     "assets": "node scripts/fetch-assets.js",
     "start": "electron .",
     "dist:win": "electron-builder --win nsis --x64 --publish never",
     "mobile:web": "node scripts/prepare-mobile.js"
   },
   "devDependencies": {
-    "electron": "^37.2.0",
-    "electron-builder": "^26.0.12"
+    "electron": "45.3.2",
+    "electron-builder": "26.18.0"
   },
   "build": {
     "appId": "app.agentdesk.desktop",
@@ -32,9 +32,19 @@
       "package.json",
       "core/desk.js",
       "core/peers.js",
+      "core/sync.js",
+      "core/tasks.js",
+      "core/mail.js",
+      "core/agent-client.js",
+      "core/cli.js",
+      "core/mcp.js",
       "desktop/**",
       "web/**",
       "!web/**/*.md"
+    ],
+    "extraFiles": [
+      { "from": "desktop/agentdesk.cmd", "to": "agentdesk.cmd" },
+      { "from": "desktop/agentdesk-mcp.cmd", "to": "agentdesk-mcp.cmd" }
     ],
     "asar": true,
     "win": {
@@ -59,7 +69,12 @@
       "language": "1049"
     }
   },
+  "overrides": {
+    "minimatch@>=7.0.0 <=11.0.0": "11.0.8"
+  },
   "dependencies": {
-    "qrcode": "^1.5.4"
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "qrcode": "^1.5.4",
+    "zod": "4.6.7"
   }
 }

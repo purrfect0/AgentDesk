@@ -224,6 +224,73 @@ tr.group td {
 td .peer-note .bad { color: #a00000; }
 table.interactive > tbody > tr.highlighted td .peer-note .bad { color: #ffd0d0; }
 
+/* Linked tasks/mail extend the existing Win98 system; no new fonts, animation or dependencies. */
+:root {
+  --ad-paper: #fff;
+  --ad-ink: #000;
+  --ad-muted: #444;
+  --ad-border: #808080;
+  --ad-navy: navy;
+  --ad-success: #006000;
+  --ad-warning: #800000;
+  --ad-gap: 8px;
+}
+.linked-view { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--ad-gap); }
+.linked-heading { display: flex; align-items: center; flex-wrap: wrap; gap: var(--ad-gap); }
+.linked-heading p { flex: 1; min-width: 180px; margin: 0; color: var(--ad-muted); }
+.linked-heading button { flex: none; }
+.linked-panel { flex: 1; min-height: 0; }
+#board-offline, #mail-sync, #mail-errors p { margin: 0; padding: 4px 6px; }
+/* One shell, one bounded vertical scroller: metadata/errors must not push files offscreen. */
+#mail-view { overflow: auto; }
+#mail-view .linked-panel { flex: none; min-height: 80px; }
+#mail-view > * { flex-shrink: 0; }
+#mail-peers p { margin: 0; padding: 2px 6px; }
+.task-card { padding: var(--ad-gap); border-bottom: 1px solid var(--ad-border); overflow-wrap: anywhere; }
+.task-card:last-child { border-bottom: 0; }
+.task-card header { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--ad-gap); }
+.task-card h2, .mail-project h2, .task-title { font-size: inherit; margin: 0; }
+.task-card h2 { flex: 1; min-width: 180px; }
+.task-card p { margin: 5px 0; }
+.task-badge { border: 1px solid var(--ad-border); padding: 2px 5px; color: var(--ad-navy); font-weight: normal; white-space: nowrap; }
+.task-accepted { color: var(--ad-success); }
+.task-blocked, .task-rework { color: var(--ad-warning); }
+.task-meta { display: grid; grid-template-columns: max-content 1fr; gap: 3px var(--ad-gap); margin: var(--ad-gap) 0; }
+.task-meta dt { color: var(--ad-muted); }
+.task-meta dd { margin: 0; min-width: 0; }
+.task-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--ad-gap); }
+.task-card details { color: var(--ad-muted); }
+.task-card summary { cursor: pointer; }
+.receipt-list { padding-left: 18px; overflow-wrap: anywhere; }
+.receipt-list li { margin: 4px 0; }
+.assignment-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 var(--ad-gap); }
+.assignment-grid .field-row-stacked { min-width: 0; }
+.assignment-grid label { display: block; }
+.dialog select { width: 100%; }
+.dialog textarea.short-text { height: 60px; }
+.context-checks { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 140px; overflow: auto; background: var(--ad-paper); color: var(--ad-ink); border: 1px solid var(--ad-border); padding: 6px; }
+#task-context { margin-top: 4px; }
+.mail-project h2 { background: silver; padding: 4px 6px; border-bottom: 1px solid var(--ad-border); }
+.mail-project h2 small { color: var(--ad-muted); font-size: inherit; font-weight: normal; }
+.mail-table { table-layout: fixed; }
+.mail-table th:first-child { width: 37%; }
+.mail-table th:last-child { width: 65px; }
+.mail-table th { white-space: normal; }
+.mail-table td { vertical-align: top; overflow-wrap: anywhere; padding-top: 6px; padding-bottom: 6px; }
+.file-hash { display: block; overflow-wrap: anywhere; }
+.mail-table .sub { display: block; margin-top: 4px; }
+.mail-root-row { margin: var(--ad-gap) 0; }
+button:focus-visible, [role=tab]:focus-visible, summary:focus-visible { outline: 1px dotted var(--ad-ink); outline-offset: -4px; }
+body.mobile [data-action="mail-roots"] { display: none !important; }
+@media (max-width: 520px) {
+  .assignment-grid { grid-template-columns: 1fr; }
+  .task-meta { grid-template-columns: 1fr; }
+  .task-actions button { flex: 1 1 120px; }
+  .dialog .buttons { flex-wrap: wrap; }
+  .mail-table th:last-child { width: 45px; }
+  .mail-table th:first-child { width: 32%; }
+}
+
 @media (max-width: 720px) {
   .main-window { inset: 0; }
   .opt, #sb-time { display: none; }

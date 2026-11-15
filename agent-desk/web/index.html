@@ -27,6 +27,7 @@
       <span class="menu-label"><u>Ф</u>айл</span>
       <div class="menu-list">
         <div class="menu-item" data-action="folders"><img src="icons/directory_closed-1.png" alt="">Папки с маркерами…</div>
+        <div class="menu-item" data-action="mail-roots"><img src="icons/envelope_closed-1.png" alt="">Папки общей почты…</div>
         <div class="menu-item" data-action="pair"><img src="icons/world-1.png" alt="">Подключить телефон…</div>
         <div class="menu-item" data-action="peers"><img src="icons/network_normal_two_pcs-1.png" alt="">Другие компьютеры…</div>
         <div class="menu-item mobile-only" data-action="connect"><img src="icons/world-1.png" alt="">Подключение к ПК…</div>
@@ -63,7 +64,7 @@
   <div class="toolbar">
     <button class="tool" data-action="copy-message" id="tb-copy" title="Копировать"><img src="icons/notepad_file-0.png" alt=""><span>Копировать</span></button>
     <button class="tool" data-action="mark-forwarded" id="tb-forwarded" title="Переслал"><img src="icons/envelope_closed-0.png" alt=""><span>Переслал</span></button>
-    <button class="tool" data-action="done-selected" id="tb-done" title="Закрыть"><img src="icons/check-0.png" alt=""><span>Закрыть</span></button>
+    <button class="tool" data-action="done-selected" id="tb-done" title="Закрыть напоминание — не принять задачу"><img src="icons/check-0.png" alt=""><span>Закрыть</span></button>
     <button class="tool hidden" data-action="send-to-peer" id="tb-send" title="Отправить на другой компьютер"><img src="icons/network_normal_two_pcs-0.png" alt=""><span>Отправить</span></button>
     <span class="tool-sep"></span>
     <button class="tool" data-action="details" id="tb-details" title="Подробно"><img src="icons/notepad-1.png" alt=""><span>Подробно</span></button>
@@ -75,7 +76,7 @@
   </div>
 
   <div class="window-body">
-    <menu role="tablist" id="project-tabs" class="project-tabs"></menu>
+    <menu role="tablist" id="project-tabs" class="project-tabs" aria-label="Проекты"></menu>
     <div class="window project-window" role="tabpanel">
     <div class="window-body">
     <fieldset class="todo-box">
@@ -90,20 +91,36 @@
     </fieldset>
     <div class="splitter" id="splitter" title="Потяните, чтобы изменить высоту (двойной щелчок — сброс)"></div>
 
-    <menu role="tablist" id="tabs"></menu>
-    <div class="window tab-window" role="tabpanel">
+    <menu role="tablist" id="tabs" aria-label="Разделы проекта"></menu>
+    <div class="window tab-window">
       <div class="window-body">
-        <div class="sunken-panel agents-panel">
+        <p id="board-offline" class="peer-warn hidden" role="status"></p>
+        <div class="sunken-panel agents-panel" id="agents-view" role="tabpanel" aria-labelledby="tab-agents">
           <table class="interactive" id="agent-table">
             <thead><tr><th class="c-ico"></th><th>Агент</th><th>Состояние</th><th class="opt">Задача</th><th>Обновлено</th></tr></thead>
             <tbody></tbody>
           </table>
-          <table class="interactive hidden" id="log-table">
+          <div class="empty hidden" id="agents-empty"><img src="icons/users-0.png" alt="">Агентов пока нет. Они появятся сами после первого маркера (Справка → Инструкция для агентов).</div>
+        </div>
+        <div class="sunken-panel agents-panel hidden" id="log-view" role="tabpanel" aria-labelledby="tab-log">
+          <table class="interactive" id="log-table">
             <thead><tr><th class="c-ico"></th><th>Время</th><th>Агент</th><th>Событие</th><th class="opt">Задача</th></tr></thead>
             <tbody></tbody>
           </table>
-          <div class="empty hidden" id="agents-empty"><img src="icons/users-0.png" alt="">Агентов пока нет. Они появятся сами после первого маркера (Справка → Инструкция для агентов).</div>
+          <div class="empty hidden" id="log-empty">В этом проекте пока нет событий.</div>
         </div>
+        <section class="linked-view hidden" id="tasks-view" role="tabpanel" aria-labelledby="tab-tasks">
+          <div class="linked-heading"><p>Одна карточка на task_id. Получение сообщения не означает приёмку задачи.</p><button data-action="task-context-roots" id="task-context-roots" class="hidden">Папки контекста…</button><button data-action="task-new" id="task-new">Назначить задачу…</button></div>
+          <p class="peer-warn hidden" id="tasks-unavailable" role="status">Эта версия сервера ещё не поддерживает карточки задач.</p>
+          <div class="sunken-panel linked-panel" id="task-list"></div>
+        </section>
+        <section class="linked-view hidden" id="mail-view" role="tabpanel" aria-labelledby="tab-mail">
+          <div class="linked-heading"><p>Общие файлы проекта, не электронная почта. Секреты и системные файлы не передаются.</p><button data-action="mail-roots" id="mail-roots">Папки…</button><button data-action="mail-refresh" id="mail-refresh">Проверить</button></div>
+          <p id="mail-sync" role="status"></p>
+          <div id="mail-peers" aria-label="Сверка по устройствам"></div>
+          <div id="mail-errors" role="status"></div>
+          <div class="sunken-panel linked-panel" id="mail-list"></div>
+        </section>
       </div>
     </div>
     </div>

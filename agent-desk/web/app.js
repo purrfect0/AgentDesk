@@ -26,7 +26,8 @@ const WAIT_LABEL = {
 const TODO_ICON = { forward: "envelope_closed-1", reply: "msg_question-2", blocked: "msg_error-2", limit: "msg_warning-2" };
 const stateLabel = (a) => (a.state === "waiting" && WAIT_LABEL[a.waiting_for]) || STATE_LABEL[a.state] || a.state;
 // Forwarded-but-unconfirmed reminders stay visible but no longer need the owner.
-const needsAction = (t) => !t.done_at && !(t.kind === "forward" && t.forwarded_at);
+// Delivery/ACK receipts are quiet telemetry, never owner actions or task acceptance.
+const needsAction = (t) => !t.done_at && !t.quiet && !["receipt", "ack", "delivery"].includes(t.kind) && !(t.kind === "forward" && (t.forwarded_at || t.acked_at || (t.delivery_target && data?.device_id && t.delivery_target !== data.device_id)));
 const isForwardPending = (t) => t && !t.done_at && t.kind === "forward";
 const isLocal = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
 // Accent animations: --ph keeps the blink phase tied to the clock (12 s fits the 1 s and 2.4 s
@@ -42,13 +43,15 @@ const agentNeedsYou = (a) => a.state === "blocked" || (a.state === "waiting" && 
 
 let data = null;
 let project = localStorage.getItem("ad.project") || "*";
-let tab = localStorage.getItem("ad.view") === "log" ? "log" : "agents";
+let tab = ["agents", "log", "tasks", "mail"].includes(localStorage.getItem("ad.view")) ? localStorage.getItem("ad.view") : "agents";
 let selected = null; // {type: "todo"|"agent", id}
 let showClosed = localStorage.getItem("ad.closed") === "1";
 let soundOn = localStorage.getItem("ad.sound") !== "0";
 let appVolume = Number(localStorage.getItem("ad.volume") ?? 70);
 let seenAlerts = null;
 let online = true;
+let lastUpdated = null;
+let dialogReturnFocus = null;
 let phoneNotify = localStorage.getItem("ad.phoneNotify") !== "0";
 const plain = (html) => { const d = document.createElement("div"); d.innerHTML = html; return d.textContent; };
 
@@ -120,7 +123,10 @@ function patchNode(old, nn) {
     const v = name === "class" && old.classList.contains("highlighted") ? `${value} highlighted`.trim() : value;
     if (old.getAttribute(name) !== v) old.setAttribute(name, v);
   }
-  for (const { name } of [...old.attributes]) if (!nn.hasAttribute(name)) old.removeAttribute(name);
+  for (const { name } of [...old.attributes]) {
+    if (old.nodeName === "DETAILS" && name === "open") continue; // disclosure belongs to the reader, not polling
+    if (!nn.hasAttribute(name)) old.removeAttribute(name);
+  }
   if (old.innerHTML !== nn.innerHTML) patchChildren(old, nn);
 }
 
@@ -151,7 +157,9 @@ function todoStatus(t) {
   if (t.sent_to && t.done_at) return `отправлено → «${esc(t.sent_to.name)}»`;
   if (t.routing && !t.done_at) return `отправляю → «${esc(t.routing.name)}»…`;
   if (t.kind === "forward") {
-    if (t.acked_at) return "получено ✓";
+    if (t.acked_at) return "ACK: получено (не приёмка)";
+    if (t.delivered_at) return t.delivery_target && t.delivery_target !== data?.device_id ? "доставлено на доску адресата; ждём ACK" : "на доске; <b>нужен запуск / ACK агента</b>";
+    if (t.delivery_target && t.delivery_target !== data?.device_id) return "ждём доставки на доску адресата";
     if (t.forwarded_at) return "переслано, ждём подтверждения";
     if (t.done_at) return "закрыто";
     return "<b>не переслано</b>";
@@ -171,9 +179,12 @@ function peerNote(t) {
 
 function allProjects() {
   const names = new Set(data.config.watch.map((w) => w.project).filter(Boolean));
+  taskList().forEach((t) => names.add(t.project));
+  (data.mail?.roots || []).forEach((r) => names.add(r.project));
+  (data.mail?.files || []).forEach((f) => names.add(f.project));
   Object.values(data.agents).forEach((a) => names.add(a.project));
   data.todos.forEach((t) => names.add(t.project));
-  return [...names].sort();
+  return [...names].filter(Boolean).sort();
 }
 
 const inProject = (x) => project === "*" || x.project === project;
@@ -199,44 +210,50 @@ function render() {
     return `${esc(name)} <b class="attn" data-since="${esc(since)}" style="${accent(since)}">(${n})</b>`;
   };
   patch($("#project-tabs"), [["*", "Все проекты"], ...projects.map((p) => [p, p])].map(([id, name]) =>
-    `<li role="tab" data-key="p:${esc(id)}" data-project="${esc(id)}" aria-selected="${id === project}"><a href="#">${label(name, openIn(id), id)}</a></li>`).join(""));
+    `<li role="tab" tabindex="${id === project ? 0 : -1}" data-key="p:${esc(id)}" data-project="${esc(id)}" aria-selected="${id === project}"><a href="#" tabindex="-1">${label(name, openIn(id), id)}</a></li>`).join(""));
 
   renderTodos();
 
-  const agents = Object.values(data.agents).filter(inProject)
+  const agents = Object.entries(data.agents).map(([key, a]) => ({ ...a, _rowKey: key })).filter(inProject)
     .sort((a, b) => a.project.localeCompare(b.project) || a.first_seen.localeCompare(b.first_seen));
   const events = data.events.filter(inProject).reverse();
-  patch($("#tabs"), [["agents", "Агенты"], ["log", "Журнал"]].map(([id, name]) =>
-    `<li role="tab" data-key="v:${id}" data-tab="${id}" aria-selected="${id === tab}"><a href="#">${name}</a></li>`).join(""));
+  patch($("#tabs"), [["agents", "Агенты"], ["log", "Журнал"], ["tasks", "Задачи"], ["mail", "Общая почта"]].map(([id, name]) =>
+    `<li role="tab" id="tab-${id}" tabindex="${id === tab ? 0 : -1}" data-key="v:${id}" data-tab="${id}" aria-controls="${id}-view" aria-selected="${id === tab}"><a href="#" tabindex="-1">${name}</a></li>`).join(""));
 
   const showLog = tab === "log";
-  $("#agent-table").classList.toggle("hidden", showLog);
-  $("#log-table").classList.toggle("hidden", !showLog);
+  $("#agents-view").classList.toggle("hidden", tab !== "agents");
+  $("#log-view").classList.toggle("hidden", !showLog);
+  $("#tasks-view").classList.toggle("hidden", tab !== "tasks");
+  $("#mail-view").classList.toggle("hidden", tab !== "mail");
+  if (tab === "tasks") renderTasks();
+  if (tab === "mail") renderMail();
+  $("#board-offline").classList.toggle("hidden", online);
+  $("#board-offline").textContent = online ? "" : `Нет связи. Показаны последние данные${lastUpdated ? ` за ${hhmm(lastUpdated)}` : ""}; изменения недоступны.`;
 
   if (showLog) {
     const seen = new Map(); // two events of one agent in the same millisecond still get their own rows
     const eventKey = (e) => {
-      const id = `${e.time}|${e.project}|${e.agent}|${e.state}`;
+      const id = `${e.event_id || e.time}|${e.project}|${e.agent}|${e.device_id || "local"}|${e.state}`;
       seen.set(id, (seen.get(id) || 0) + 1);
       return `e:${id}#${seen.get(id)}`;
     };
     patch($("#log-table tbody"), grouped(events, 5, (e) => `
       <tr data-key="${esc(eventKey(e))}"><td class="c-ico"><img src="${icon(STATE_ICON[e.state])}" alt=""></td>
       <td class="nowrap">${hhmm(e.time)} <span class="sub">${esc(ago(e.time))}</span></td>
-      <td class="nowrap">${esc(e.agent)}</td>
+      <td>${esc(e.agent)}${e.device_id ? `<br><span class="sub">${esc(deviceLabel(e.device_id))}</span>` : ""}</td>
       <td class="nowrap">${esc(stateLabel(e))}${e.to ? ` → ${esc(e.to)}` : ""}${e.ack ? ` (подтвердил ${esc(e.ack)})` : ""}</td>
       <td class="task opt" title="${esc(e.task)}">${esc(e.task)}</td></tr>`));
-    $("#agents-empty").classList.toggle("hidden", events.length > 0);
-  } else {
+    $("#log-empty").classList.toggle("hidden", events.length > 0);
+  } else if (tab === "agents") {
     patch($("#agent-table tbody"), grouped(agents, 5, (a) => {
-      const key = `${a.project}/${a.agent}`;
+      const key = a._rowKey;
       const stale = isStale(a);
       const text = esc(stale ? `${stateLabel(a)}? активность не подтверждена ${ago(a.updated)}` : stateLabel(a));
       const attn = stale || agentNeedsYou(a);
       const cls = [stale && "stale", attn && "attn"].filter(Boolean).join(" ");
       return `<tr class="${cls}" data-key="a:${esc(key)}" data-agent="${esc(key)}"${attn ? ` data-since="${esc(a.updated)}" style="${accent(a.updated)}"` : ""}>
         <td class="c-ico"><img src="${icon(stale ? STATE_ICON.stale : STATE_ICON[a.state])}" alt=""></td>
-        <td class="nowrap"><b>${esc(a.agent)}</b></td>
+        <td><b>${esc(a.agent)}</b>${a.device_id ? `<br><span class="sub">${esc(deviceLabel(a.device_id))}</span>` : ""}</td>
         <td class="nowrap state">${text}${a.state === "done" && a.to ? ` → ${esc(a.to)}` : ""}</td>
         <td class="task opt" title="${esc(a.task)}">${esc(a.task)}</td>
         <td class="nowrap">${esc(ago(a.updated))}</td></tr>`;
@@ -249,7 +266,7 @@ function render() {
   const where = project === "*" ? "" : ` в ${project}`;
   $("#sb-main").textContent = online ? (open ? `Нужно сделать${where}: ${open}` : `Всё под контролем${where}`) : "Нет связи с Agent Desk на ПК";
   $("#sb-counts").textContent = `Агентов: ${agents.length} · работают: ${count("working")} · ждут: ${count("waiting")}`;
-  $("#sb-time").textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU")}`;
+  $("#sb-time").textContent = lastUpdated ? `Обновлено ${hhmm(lastUpdated)}` : "Загрузка…";
   const total = openIn("*");
   const title = total ? `(${total}) Agent Desk` : "Agent Desk";
   if (document.title !== title) {
@@ -279,13 +296,14 @@ function applySelection() {
   });
   const todo = selected?.type === "todo" ? data.todos.find((t) => t.id === selected.id) : null;
   $("#tb-copy").disabled = !todo?.message;
-  $("#tb-forwarded").disabled = !(isForwardPending(todo) && !todo.forwarded_at);
-  $("#tb-done").disabled = !(todo && !todo.done_at);
+  $("#tb-forwarded").disabled = !(online && isForwardPending(todo) && !todo.forwarded_at && !todo.acked_at);
+  $("#tb-done").disabled = !(online && todo && !todo.done_at);
   const peers = data.link?.peers || [];
   $("#tb-send").classList.toggle("hidden", !peers.length); // shown once another computer is paired
-  $("#tb-send").disabled = !(todo && !todo.done_at && peers.length);
+  $("#tb-send").disabled = !(online && todo && !todo.done_at && peers.length);
   $("#tb-details").disabled = !selected;
-  $("#tb-forget").disabled = selected?.type !== "agent";
+  const agent = selected?.type === "agent" ? data.agents[selected.id] : null;
+  $("#tb-forget").disabled = !agent || (!!agent.device_id && agent.device_id !== data.device_id);
 }
 
 function renderTodos() {
@@ -320,6 +338,242 @@ function renderTodos() {
   }));
   $("#todo-table").classList.toggle("hidden", todos.length === 0);
   $("#todo-empty").classList.toggle("hidden", todos.length > 0);
+}
+
+// --- linked tasks and project files ----------------------------------------------
+// Preserve the established 98.css windows, inset panels, controls and quiet typography.
+const TASK_LABEL = { assigned: "назначена", working: "в работе", submitted: "сдана на проверку", accepted: "принята", rework: "на доработке", blocked: "заблокирована" };
+const TASK_NEXT = { assigned: ["working", "submitted", "blocked"], working: ["submitted", "blocked"], submitted: ["accepted", "rework", "blocked"], accepted: [], rework: ["working", "submitted", "blocked"], blocked: ["assigned", "working", "submitted", "rework"] };
+const listValues = (value) => Array.isArray(value) ? value : Object.values(value || {});
+function taskList() {
+  // Replication can briefly include duplicate snapshots; identity is never the display title.
+  const byId = new Map();
+  for (const t of listValues(data?.tasks)) {
+    if (!t?.task_id) continue;
+    const old = byId.get(t.task_id);
+    if (!old || String(t.updated || "") >= String(old.updated || "")) byId.set(t.task_id, t);
+  }
+  return [...byId.values()];
+}
+const canCoordinate = (t) => online && !!data?.device_id && (!t || t.coordinator_device_id === data.device_id);
+const deviceLabel = (id) => id === data?.device_id ? (data.link?.name || "этот компьютер") : (data?.link?.peers || []).find((p) => p.id === id)?.name || id || "устройство не указано";
+const currentTask = (id) => taskList().find((t) => t.task_id === id);
+const taskEpoch = (t) => Number(t?.assignment?.epoch ?? t?.assignment_epoch ?? 0);
+const taskReceiptRows = (t) => (data?.todos || []).filter((r) => r.task_id === t.task_id);
+function receiptsMarkup(t) {
+  const rows = taskReceiptRows(t);
+  if (!rows.length) return '<span class="sub">Сообщений и квитанций пока нет.</span>';
+  return rows.map((r) => `<li><code>${esc(r.message_id || r.display_id || `AD-${r.id}`)}</code>${r.to ? ` → ${esc(r.to)}` : ""} · ${[
+    ["delivered_at", "доставлено на доску"], ["forwarded_at", "переслано"], ["acked_at", "ACK: получено"], ["done_at", "напоминание закрыто"]
+  ].filter(([k]) => r[k]).map(([k, title]) => `<span title="${esc(r[k])}">${title}</span>`).join(" · ") || "ожидает доставки"}</li>`).join("");
+}
+function renderTasks() {
+  const supported = data.tasks !== undefined;
+  $("#tasks-unavailable").classList.toggle("hidden", supported);
+  $("#task-new").disabled = !supported || !canCoordinate();
+  const localOwner = isLocal && AD_HOST.kind !== "mobile";
+  $("#task-context-roots").classList.toggle("hidden", !localOwner);
+  $("#task-context-roots").disabled = !online || data.config.task_repo_roots === undefined || data.config.task_skill_roots === undefined;
+  const tasks = taskList().filter(inProject).sort((a, b) => String(b.updated || "").localeCompare(String(a.updated || "")));
+  patch($("#task-list"), tasks.length ? tasks.map((t) => {
+    const a = t.assignment || {};
+    const coordinator = canCoordinate(t);
+    const readonly = !online ? "Нет связи — только просмотр" : !coordinator ? "Назначение и передача — на компьютере ведущего" : "";
+    return `<article class="task-card" data-key="task:${esc(t.task_id)}">
+      <header><h2>${esc(t.title || t.task || "Без названия")}</h2><b class="task-badge task-${esc(Object.hasOwn(TASK_LABEL, t.state) ? t.state : "unknown")}">${esc(TASK_LABEL[t.state] || t.state || "неизвестно")}</b></header>
+      <p class="sub">${esc(t.project)} · <code>${esc(t.task_id)}</code> · ${esc(ago(t.updated))}</p>
+      <dl class="task-meta"><dt>Исполнитель</dt><dd>${esc(a.agent || "не назначен")} · ${esc(a.role || "роль не задана")}</dd><dt>Устройство / сессия</dt><dd><code>${esc(a.device_id || "—")} / ${esc(a.session_id || "—")}</code> · назначение #${taskEpoch(t)}</dd></dl>
+      ${t.conflict ? `<p class="peer-warn">Конфликт задания: ${esc(typeof t.conflict === "string" ? t.conflict : "нужна сверка ведущим")}</p>` : ""}
+      <details><summary>Сообщения и квитанции (${taskReceiptRows(t).length})</summary><ul class="receipt-list">${receiptsMarkup(t)}</ul><p class="sub">ACK подтверждает только получение, а не выполнение или приёмку.</p></details>
+      <div class="task-actions"><button data-task-action="details" data-task-id="${esc(t.task_id)}">Подробно…</button><button data-task-action="context" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Контекст / копировать…</button><button data-task-action="assign" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Назначить…</button><button data-task-action="transition" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Состояние…</button><button data-task-action="handoff" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Передать…</button></div>
+      ${readonly ? `<p class="sub">${readonly}</p>` : ""}</article>`;
+  }).join("") : `<p class="empty">${supported ? "Задач пока нет. Назначьте первую задачу; её task_id останется тем же при смене сессии." : "Ожидается сервер с поддержкой задач."}</p>`);
+}
+function taskDetails(t) {
+  const cp = t.checkpoint || {};
+  const kv = (k, v) => v === undefined || v === null || v === "" ? "" : `<dt>${esc(k)}</dt><dd>${esc(typeof v === "object" ? JSON.stringify(v, null, 2) : v)}</dd>`;
+  dialog("Задача — подробности", `<h2 class="task-title">${esc(t.title || t.task)}</h2><dl class="kv">${kv("task_id", t.task_id)}${kv("project_id", t.project_id)}${kv("Состояние", TASK_LABEL[t.state] || t.state)}${kv("Ведущий (device_id)", t.coordinator_device_id)}${kv("Назначение", t.assignment)}${["repo", "branch", "commit", "report", "manifest", "next_step", "constraints", "skills"].map((k) => kv(k, cp[k])).join("")}</dl>
+    <h3>Артефакты</h3>${listValues(t.artifacts).length ? `<ul class="receipt-list">${listValues(t.artifacts).map((a) => `<li><code>${esc(a.path)}</code> · ${esc(a.status || "не проверен")}<br><code>${esc(a.hash || a.sha256 || "SHA не указан")}</code></li>`).join("")}</ul>` : "<p>Артефактов пока нет.</p>"}
+    <h3>История задачи</h3><ul class="receipt-list">${(t.history || []).slice(-12).reverse().map((h) => `<li>${esc(h.time || h.at || "")} · ${esc(TASK_LABEL[h.state] || h.action || h.state || "событие")}${h.note ? ` · ${esc(h.note)}` : ""}</li>`).join("") || "<li>Истории пока нет.</li>"}</ul><div class="buttons"><button data-close>Закрыть</button></div>`);
+}
+function checksMarkup(checks) {
+  if (!checks || (typeof checks === "object" && !Object.keys(checks).length)) return "Проверки не предоставлены сервером — состояние репозитория не подтверждено.";
+  // Render server verification metadata as text, not executable instructions or HTML.
+  return typeof checks === "string" ? checks : JSON.stringify(checks, null, 2);
+}
+function contextDialog(t, result, title = "Контекст задачи — локальные проверки") {
+  dialog(title, `<p>task_id: <code>${esc(t.task_id)}</code>. Проверки выполняются сервером только локально; копирование не запускает агента.</p><h3 id="context-checks-label">Результаты проверок (включая предупреждения)</h3><pre id="context-checks" class="context-checks" aria-labelledby="context-checks-label" tabindex="0">${esc(checksMarkup(result.checks))}</pre>
+    <label for="task-context">Контекст для новой сессии</label><textarea id="task-context" readonly></textarea><p id="context-result" role="status"></p><div class="buttons"><button id="copy-context"${typeof result.text === "string" && result.text.trim() ? "" : " disabled"}>Копировать контекст</button><button data-close>Закрыть</button></div>`, (node) => {
+    const ta = node.querySelector("#task-context"); ta.value = typeof result.text === "string" ? result.text : "";
+    node.querySelector("#copy-context").onclick = async () => {
+      const ok = await copyText(ta.value);
+      node.querySelector("#context-result").textContent = ok ? "Контекст скопирован. Запустите/подключите новую сессию вручную, если адаптер не поддерживает запуск." : "Буфер обмена недоступен: выделите контекст и скопируйте вручную.";
+      if (!ok) { ta.focus(); ta.select(); }
+    };
+  });
+}
+async function fetchTaskContext(t) {
+  dialog("Контекст задачи", '<p role="status">Проверяю локальный checkpoint…</p><div class="buttons"><button data-close>Отмена</button></div>');
+  const node = $("#modal-layer").firstElementChild;
+  try {
+    const result = await api(`/api/tasks/context?id=${encodeURIComponent(t.task_id)}`);
+    if (node.isConnected) contextDialog(result.task || t, result);
+  } catch (e) {
+    if (node.isConnected) alertBox("Контекст недоступен", `${e.message}. Проверьте связь и разрешённые пути checkpoint.`, "msg_error-0");
+  }
+}
+function contextRootsDialog() {
+  if (!isLocal || AD_HOST.kind === "mobile") { alertBox("Папки контекста", "Разрешённые пути можно настроить только локально на компьютере Agent Desk."); return; }
+  if (!online) { alertBox("Папки контекста", "Нет связи: настройка сейчас недоступна."); return; }
+  if (data.config.task_repo_roots === undefined || data.config.task_skill_roots === undefined) { alertBox("Папки контекста", "Эта версия сервера ещё не поддерживает явные разрешения контекста."); return; }
+  // Read the existing approvals first; replace only these two fields, never the whole config.
+  const current = { task_repo_roots: [...data.config.task_repo_roots], task_skill_roots: [...data.config.task_skill_roots] };
+  dialog("Папки контекста — только этот компьютер", '<p>Проверка checkpoint читает только явно разрешённые локальные папки. Укажите узкие папки репозиториев и выбранных skills, не домашнюю папку целиком. Пути не подбираются автоматически и не передаются другим устройствам.</p><form id="context-roots-form"><div class="field-row-stacked"><label for="context-repo-roots">Репозитории — один существующий абсолютный путь на строку</label><textarea id="context-repo-roots" class="short-text" maxlength="30000" spellcheck="false" autocapitalize="off"></textarea></div><div class="field-row-stacked"><label for="context-skill-roots">Skills — один существующий абсолютный путь на строку</label><textarea id="context-skill-roots" class="short-text" maxlength="30000" spellcheck="false" autocapitalize="off"></textarea></div><p class="sub">Не более 20 папок в каждом списке. Пустой список снимает разрешения: соответствующая проверка контекста останется закрытой. Настройки папок маркеров и общей почты не меняются.</p><p id="context-roots-error" class="bad" role="status" aria-live="polite"></p><div class="buttons"><button type="submit" id="context-roots-save">Сохранить разрешения</button><button type="button" data-close>Отмена</button></div></form>', (node) => {
+    node.querySelector("#context-repo-roots").value = current.task_repo_roots.join("\n");
+    node.querySelector("#context-skill-roots").value = current.task_skill_roots.join("\n");
+    const collect = (id) => [...new Set(node.querySelector(id).value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
+    node.querySelector("#context-roots-form").onsubmit = async (e) => {
+      e.preventDefault();
+      const save = node.querySelector("#context-roots-save"), err = node.querySelector("#context-roots-error");
+      if (save.disabled) return;
+      if (!online) { err.textContent = "Нет связи: изменения не отправлены."; return; }
+      const body = { task_repo_roots: collect("#context-repo-roots"), task_skill_roots: collect("#context-skill-roots") };
+      if (body.task_repo_roots.length > 20 || body.task_skill_roots.length > 20) { err.textContent = "Не более 20 папок в каждом списке."; return; }
+      save.disabled = true; err.textContent = "Сохраняю локальные разрешения…";
+      try {
+        await api("/api/config", body);
+        Object.assign(data.config, body);
+        await poll();
+        if (node.isConnected) closeDialog();
+      } catch (error) { if (node.isConnected) err.textContent = `Не сохранено: ${error.message}. Нужны существующие обычные папки с абсолютными путями.`; }
+      finally { if (node.isConnected) save.disabled = false; }
+    };
+    node.querySelector("#context-repo-roots").focus();
+  });
+}
+
+function assignmentFields(t) {
+  const a = t?.assignment || {};
+  const bindings = listValues(data.bindings).filter((b) => !t || b.project === t.project);
+  const field = (key, label, value, required = true) => `<div class="field-row-stacked"><label for="assign-${key}">${label}</label><input id="assign-${key}" name="${key}" type="text" value="${esc(value)}"${required ? " required" : ""} autocomplete="off" spellcheck="false" maxlength="240"></div>`;
+  return `${bindings.length ? `<div class="field-row-stacked"><label for="assign-binding">Сохранённая привязка</label><select id="assign-binding"><option value="">Введите вручную</option>${bindings.map((b, i) => `<option value="${i}">${esc(`${b.agent} · ${b.device_id} / ${b.session_id} · ${b.role || "без роли"}`)}</option>`).join("")}</select></div>` : ""}<div class="assignment-grid">${field("agent", "Имя агента", a.agent)}${field("device_id", "Устройство (device_id)", a.device_id || data.device_id)}${field("session_id", "Новая / активная сессия (session_id)", a.session_id)}${field("role", "Роль (исполнитель / ревьюер / ведущий)", a.role || "executor")}${field("adapter", "Адаптер запуска (manual / runtime)", a.adapter || "manual", false)}</div>`;
+}
+function taskMutationDialog(mode, t) {
+  if (!online || (mode !== "transition" && !canCoordinate(t))) return;
+  const creating = !t;
+  const label = { assign: creating ? "Назначить новую задачу" : "Изменить назначение", handoff: "Передать задачу в новую сессию", transition: "Состояние задачи" }[mode];
+  const newFields = creating ? '<div class="field-row-stacked"><label for="task-project">Проект</label><input type="text" id="task-project" required maxlength="160"></div><div class="field-row-stacked"><label for="task-title">Название задачи</label><input type="text" id="task-title" required maxlength="500"></div>' : `<p>${esc(t.title || t.task)}<br><code>${esc(t.task_id)}</code> · назначение #${taskEpoch(t)}</p>`;
+  const lifecycle = mode === "transition" ? `<div class="field-row-stacked"><label for="task-state">Новое состояние (отдельно от ACK)</label><select id="task-state">${Object.entries(TASK_LABEL).map(([k, v]) => `<option value="${k}"${k === t.state ? " selected" : ""}${k !== t.state && (!(TASK_NEXT[t.state] || []).includes(k) || (["accepted", "rework"].includes(k) && !canCoordinate(t))) ? " disabled" : ""}>${v}</option>`).join("")}</select></div><div class="field-row-stacked"><label for="task-note">Пояснение</label><input type="text" id="task-note" maxlength="1000"></div>` : assignmentFields(t);
+  const checkpointFields = mode === "handoff" ? `<details><summary>Checkpoint: репозиторий, ветка, commit, отчёт</summary>${["repo", "branch", "commit", "report"].map((k) => `<div class="field-row-stacked"><label for="checkpoint-${k}">${esc(k)}</label><input type="text" id="checkpoint-${k}" value="${esc(t.checkpoint?.[k])}" autocomplete="off" spellcheck="false" maxlength="1024"></div>`).join("")}<p class="sub">Проверяются только явно разрешённые локальные пути. Список выбранных skills и артефакты сохраняются; содержимое файлов здесь не читается.</p></details>` : "";
+  const handoff = mode === "handoff" ? '<p>Сохраняется текущий checkpoint и артефакты. После передачи получите контекст с результатами локальных проверок. Не вставляйте секреты или команды.</p><div class="field-row-stacked"><label for="handoff-next">Следующий шаг</label><textarea id="handoff-next" class="short-text" maxlength="4000"></textarea></div><div class="field-row-stacked"><label for="handoff-constraints">Ограничения / запреты (по одному на строку)</label><textarea id="handoff-constraints" class="short-text" maxlength="4000"></textarea></div>' : "";
+  dialog(label, `<form id="task-form">${newFields}${lifecycle}${checkpointFields}${handoff}<p id="task-error" class="bad" role="status" aria-live="polite"></p><p class="sub">Старое назначение не принимается: при конфликте обновите карточку. Неизвестный адаптер требует ручного запуска.</p><div class="buttons"><button type="submit" id="task-save">${mode === "handoff" ? "Передать и получить контекст" : "Сохранить"}</button><button type="button" data-close>Отмена</button></div></form>`, (node) => {
+    if (creating) node.querySelector("#task-project").value = project === "*" ? "" : project;
+    if (mode === "handoff") {
+      for (const k of ["repo", "branch", "commit", "report"]) node.querySelector(`#checkpoint-${k}`).value = t.checkpoint?.[k] || "";
+      node.querySelector("#handoff-next").value = t.checkpoint?.next_step || "";
+      node.querySelector("#handoff-constraints").value = Array.isArray(t.checkpoint?.constraints) ? t.checkpoint.constraints.join("\n") : String(t.checkpoint?.constraints || "");
+      node.querySelector("#assign-session_id").value = "";
+    }
+    const bindings = listValues(data.bindings).filter((b) => !t || b.project === t.project);
+    node.querySelector("#assign-binding")?.addEventListener("change", (e) => {
+      const b = bindings[Number(e.target.value)]; if (e.target.value === "" || !b) return;
+      for (const k of ["agent", "device_id", "session_id", "role", "adapter"]) node.querySelector(`#assign-${k}`).value = b[k] || "";
+    });
+    node.querySelector("#task-form").onsubmit = async (e) => {
+      e.preventDefault();
+      const save = node.querySelector("#task-save"), err = node.querySelector("#task-error");
+      if (save.disabled || !node.querySelector("#task-form").reportValidity()) return;
+      if (!online) { err.textContent = "Нет связи: изменения не отправлены."; return; }
+      const body = { task_id: t?.task_id, project: creating ? node.querySelector("#task-project").value.trim() : t.project, project_id: t?.project_id, assignment_epoch: taskEpoch(t) };
+      if (mode === "transition") { body.state = node.querySelector("#task-state").value; body.note = node.querySelector("#task-note").value.trim(); body.agent = t.assignment?.agent; body.device_id = t.assignment?.device_id; body.session_id = t.assignment?.session_id; }
+      else {
+        body.assignment = Object.fromEntries(["agent", "device_id", "session_id", "role", "adapter"].map((k) => [k, node.querySelector(`#assign-${k}`).value.trim()]));
+        if (!body.assignment.adapter) body.assignment.adapter = "manual";
+        Object.assign(body, body.assignment); // flat fields are accepted by the additive TaskService contract too
+        if (creating) body.title = node.querySelector("#task-title").value.trim();
+        if (mode === "handoff") body.checkpoint = { ...t.checkpoint, ...Object.fromEntries(["repo", "branch", "commit", "report"].map((k) => [k, node.querySelector(`#checkpoint-${k}`).value.trim()])), next_step: node.querySelector("#handoff-next").value.trim(), constraints: node.querySelector("#handoff-constraints").value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) };
+      }
+      save.disabled = true; err.textContent = "Сохраняю…";
+      let handoffSaved = false;
+      try {
+        const result = await api(`/api/tasks/${mode}`, body);
+        handoffSaved = mode === "handoff";
+        await poll();
+        if (!node.isConnected) return;
+        if (mode === "handoff") {
+          const assigned = result.task || currentTask(t.task_id) || t;
+          // Always fetch after the durable handoff: never copy unchecked client-built context.
+          const context = await api(`/api/tasks/context?id=${encodeURIComponent(t.task_id)}`);
+          if (node.isConnected) contextDialog(context.task || assigned, context, "Передача сохранена — контекст новой сессии");
+        } else closeDialog();
+      } catch (error) {
+        if (node.isConnected) err.textContent = `${error.status === 409 ? "Назначение изменилось или действие доступно только ведущему. " : ""}${error.message}${mode === "handoff" ? " Если передача уже сохранена, откройте «Контекст» в обновлённой карточке; не отправляйте её повторно." : ""}`;
+      } finally { if (node.isConnected) { save.disabled = handoffSaved; if (handoffSaved) save.textContent = "Передача сохранена"; } }
+    };
+    node.querySelector(creating ? "#task-project" : mode === "transition" ? "#task-state" : "#assign-agent")?.focus();
+  });
+}
+function syncDescription() {
+  const sync = data.link?.sync;
+  if (!online) return "Нет связи с этим Agent Desk. Показан последний сохранённый список файлов.";
+  if (!sync) return "Статус синхронизации не предоставлен. Передача файлов не подтверждена.";
+  if (typeof sync === "string") return sync;
+  const pieces = [];
+  if (sync.enabled !== undefined) pieces.push(sync.enabled ? `Синхронизация включена${sync.protocol ? ` (протокол ${sync.protocol})` : ""}` : "Синхронизация выключена");
+  if (sync.events !== undefined) pieces.push(`событий в журнале: ${sync.events}`);
+  if (sync.status || sync.state) pieces.push(String(sync.status || sync.state));
+  if (sync.last_sync || sync.last_at || sync.updated) pieces.push(`последняя сверка: ${ago(sync.last_sync || sync.last_at || sync.updated)}`);
+  if (sync.pending !== undefined) pieces.push(`в очереди: ${sync.pending}`);
+  if (sync.error) pieces.push(String(sync.error));
+  const peers = data.link?.peers || [];
+  const unavailable = peers.filter((p) => p.online === false || p.sync?.status === "unsupported" || (p.protocol && p.protocol < 3));
+  if (unavailable.length) pieces.push(unavailable.map((p) => `${p.name}: ${p.sync?.status === "unsupported" || (p.protocol && p.protocol < 3) ? "старая версия, ручная пересылка" : "не в сети"}`).join("; "));
+  return pieces.join(" · ") || "Сверка подключённых устройств; подробный статус пока не предоставлен.";
+}
+function relativeMailPath(path) {
+  const text = String(path || "");
+  return !text || /^(?:[A-Za-z]:|[\\/])/.test(text) || text.split(/[\\/]/).includes("..") ? "Небезопасный путь скрыт" : text;
+}
+function renderMail() {
+  const mail = data.mail;
+  $("#mail-roots").disabled = !online || !isLocal || AD_HOST.kind === "mobile" || !mail;
+  $("#mail-refresh").disabled = !online || !mail;
+  $("#mail-sync").textContent = syncDescription();
+  const syncErrors = Object.entries(data.link?.sync?.errors || {}).map(([id, error]) => ({ project: (data.link?.peers || []).find((p) => p.id === id)?.name || "Устройство", message: typeof error === "string" ? error : "ошибка синхронизации" }));
+  patch($("#mail-errors"), [...(mail?.errors || []), ...syncErrors].map((e) => `<p class="peer-warn">${esc(typeof e === "string" ? e : `${e.project || "Проект"}: ${e.error || e.message || e.status || "ошибка сканирования"}`)}${e.path ? ` · <code>${esc(relativeMailPath(e.path))}</code>` : ""}</p>`).join(""));
+  patch($("#mail-peers"), (data.link?.peers || []).map((p) => `<p class="sub" data-key="sync-peer:${esc(p.id)}">${esc(p.name)} · ${esc(p.synced ? `последняя сверка ${ago(p.synced)}` : "сверка пока не подтверждена")}${p.error ? ` · ${esc(p.error)}` : ""}</p>`).join(""));
+  if (!mail) { patch($("#mail-list"), '<p class="empty">Сервер ещё не поддерживает общие файлы проектов.</p>'); return; }
+  const files = (mail.files || []).filter(inProject);
+  const roots = (mail.roots || []).filter(inProject);
+  const projects = [...new Set([...roots, ...files].map((r) => r.project))].sort();
+  patch($("#mail-list"), projects.length ? projects.map((p) => {
+    const rows = files.filter((f) => f.project === p).sort((a, b) => String(a.path).localeCompare(String(b.path)));
+    return `<section class="mail-project" data-key="mail:${esc(p)}"><h2>${esc(p)} <small>· папок: ${roots.filter((r) => r.project === p).length}</small></h2>${rows.length ? `<table class="mail-table"><thead><tr><th>Файл (относительно общей папки)</th><th>SHA-256 / статус</th><th>Размер</th></tr></thead><tbody>${rows.map((f) => `<tr data-key="file:${esc(`${f.project}/${f.path}`)}"><td><code>${esc(relativeMailPath(f.path))}</code></td><td><code class="file-hash">${esc(f.sha256 || "SHA не указан")}</code><span class="sub">${esc(f.status || "в локальном индексе; получение другим устройством не подтверждено")}</span></td><td>${esc(f.size ?? "—")} Б</td></tr>`).join("")}</tbody></table>` : '<p class="empty">В общей папке пока нет подходящих файлов. Секреты, скрытые и системные файлы исключаются.</p>'}</section>`;
+  }).join("") : '<p class="empty">Общие папки не настроены. На этом компьютере выберите «Папки…». Автоматически используются только существующие проектные mail рядом с monitor/inbox.</p>');
+}
+function mailRootsDialog() {
+  if (!online || !isLocal || AD_HOST.kind === "mobile") { alertBox("Папки общей почты", "Эта настройка доступна только локально на компьютере Agent Desk."); return; }
+  if (!data.mail) { alertBox("Папки общей почты", "Сервер ещё не поддерживает настройку общих файлов."); return; }
+  dialog("Общие папки — только этот компьютер", '<p>Настройка локальных путей не передаётся другим устройствам. Выбирайте только папку общих файлов проекта, не домашнюю папку целиком. Это не SMTP/IMAP. Сохранение пустого списка отключает явно заданные папки.</p><form id="mail-roots-form"><div id="mail-root-rows"></div><button type="button" id="mail-root-add">Добавить папку</button><p id="mail-root-error" class="bad" role="status"></p><div class="buttons"><button type="submit" id="mail-root-save">Сохранить</button><button type="button" data-close>Отмена</button></div></form>', (node) => {
+    let rowId = 0;
+    const add = (root = {}) => {
+      const i = rowId++;
+      node.querySelector("#mail-root-rows").insertAdjacentHTML("beforeend", `<fieldset class="mail-root-row"><legend>Общая папка</legend><div class="field-row-stacked"><label for="mail-project-${i}">Проект</label><input id="mail-project-${i}" data-root-project type="text" required maxlength="160" value="${esc(root.project)}"></div><div class="field-row-stacked"><label for="mail-path-${i}">Локальный абсолютный путь</label><input id="mail-path-${i}" data-root-path type="text" required value="${esc(root.path)}" autocomplete="off" spellcheck="false"></div><button type="button" data-root-remove>Убрать из настройки</button></fieldset>`);
+    };
+    (data.mail.roots || []).forEach(add);
+    node.querySelector("#mail-root-add").onclick = () => { add({ project: project === "*" ? "" : project }); node.querySelector(".mail-root-row:last-child input").focus(); };
+    node.addEventListener("click", (e) => { e.target.closest("[data-root-remove]")?.closest(".mail-root-row").remove(); });
+    node.querySelector("#mail-roots-form").onsubmit = async (e) => {
+      e.preventDefault(); const btn = node.querySelector("#mail-root-save"), err = node.querySelector("#mail-root-error");
+      if (btn.disabled || !node.querySelector("#mail-roots-form").reportValidity()) return;
+      if (!online) { err.textContent = "Нет связи: настройка не отправлена."; return; }
+      const roots = [...node.querySelectorAll(".mail-root-row")].map((r) => ({ project: r.querySelector("[data-root-project]").value.trim(), path: r.querySelector("[data-root-path]").value.trim() }));
+      btn.disabled = true; err.textContent = "Сохраняю локальную настройку…";
+      try { await api("/api/mail/config", { roots }); await poll(); if (node.isConnected) closeDialog(); }
+      catch (error) { if (node.isConnected) err.textContent = `Не сохранено: ${error.message}`; }
+      finally { if (node.isConnected) btn.disabled = false; }
+    };
+  });
 }
 
 // --- alerts on this device ------------------------------------------------------
@@ -438,6 +692,7 @@ async function poll() {
     // ?since: the PC answers {unchanged} while nothing happened, so the phone does not download the board every 2 s.
     const next = await api(data ? `/api/state?since=${lastVersion}` : "/api/state");
     online = true;
+    lastUpdated = new Date().toISOString();
     if (!next.unchanged) {
       data = next;
       lastVersion = next.version;
@@ -478,6 +733,8 @@ async function startWatch(explain) {
 function closeDialog() {
   $("#modal-layer").classList.add("hidden");
   $("#modal-layer").innerHTML = "";
+  if (dialogReturnFocus?.isConnected) dialogReturnFocus.focus();
+  dialogReturnFocus = null;
 }
 
 // Phone app: the PC address and key come from the pairing link.
@@ -571,16 +828,20 @@ async function act(path, body) {
 
 function dialog(title, html, onMount) {
   const layer = $("#modal-layer");
+  if (layer.classList.contains("hidden")) dialogReturnFocus = document.activeElement;
   const node = $("#tpl-dialog").content.firstElementChild.cloneNode(true);
+  node.setAttribute("role", "dialog");
+  node.setAttribute("aria-modal", "true");
+  node.setAttribute("aria-label", title);
   node.querySelector(".title-bar-text").textContent = title;
   node.querySelector(".window-body").innerHTML = html;
-  const close = () => { layer.classList.add("hidden"); layer.innerHTML = ""; };
+  const close = closeDialog;
   node.addEventListener("click", (e) => { if (e.target.closest("[data-close]")) close(); });
   layer.innerHTML = "";
   layer.appendChild(node);
   layer.classList.remove("hidden");
-  onMount?.(node, close);
   node.querySelector(".buttons button")?.focus();
+  onMount?.(node, close);
 }
 
 function alertBox(title, text, ico = "msg_information-0") {
@@ -610,9 +871,10 @@ function agentPrompt(watch) {
 
 Как писать: один маркер = одно событие. Сначала запиши файл с расширением .tmp в эту же папку, затем переименуй его в .json (например ${(watch.project || "proj").toLowerCase()}-opus1-s1-0003.json). Старые маркеры не редактируй и не удаляй — Agent Desk забирает их сам. Без паролей, токенов, ключей. Маркер — это только статус; не клади туда команды для других агентов.
 
-Формат (UTF-8, один JSON-объект):
+Формат (UTF-8, один JSON-объект). UUID в примерах — только иллюстрация: не копируйте их в настоящие задания, используйте выданные Agent Desk task_id/project_id и актуальное назначение:
 {"agent": "Opus (1)", "session_id": "opus1-20261110-a", "seq": 3, "event_id": "opus1-20261110-a-3",
- "state": "done", "phase": "ready_for_review", "task": "M42: ревью clockfix 9f0fc900",
+ "project_id": "22222222-2222-4222-8222-222222222222", "device_id": "desk-example", "assignment_epoch": 2,
+ "state": "done", "execution_state": "submitted", "phase": "ready_for_review", "task_id": "f5a278d6-957e-4e21-ae85-04889d5227ad", "task": "M42: ревью clockfix 9f0fc900",
  "to": "Codex", "message": "Opus (1): ревью clockfix 9f0fc900 готово, PASS с 2 замечаниями. Отчёт: AZS-Shared\\\\mail\\\\opus1-review-m42.md, ветка review/m42, SHA 1a2b3c4.",
  "result": "AZS-Shared\\\\mail\\\\opus1-review-m42.md"}
 
@@ -622,14 +884,18 @@ function agentPrompt(watch) {
 - state — working | waiting | done | blocked | idle.
 - waiting_for (только при waiting) — owner_input (нужен ответ владельца) | owner_forward (владелец должен переслать) | reviewer | coordinator_review | resource (телефон/сервер занят) | model_limit (закончился лимит).
 - phase (необязательно) — assigned | implementing | testing | ready_for_review | ready_for_host | accepted.
-- task — ID задачи и кратко, одной строкой.
+- task_id — UUID задачи, остаётся тем же при передаче другой сессии; получите его через inbox/status Agent Desk или от ведущего. project_id, device_id и assignment_epoch берите из актуального задания; не меняйте их сами.
+- task — краткое название задачи, одной строкой (не заменяет task_id).
+- execution_state — assigned | working | submitted | accepted | rework | blocked. Жизненный цикл задачи независим от state маркера и закрытия напоминания. Приёмку accepted подтверждает ведущий; сдача результата — submitted.
+- checkpoint — структурированные repo, branch, commit, report, manifest, next_step, constraints, skills; artifacts — список path/hash/status. Только разрешённые пути, без секретов и произвольных команд.
 - to — кому владелец должен переслать результат (имя агента). Указывай, когда сдал работу или ждёшь ревью/приёмки.
 - message — готовый короткий текст, который владелец вставит в чат адресата: что сделано, ветка/SHA, путь к отчёту, что нужно от адресата.
-- ack — если тебе переслали сообщение со строкой «[Agent Desk] message_id: AD-12», то в первом маркере working по этой задаче укажи "ack": "AD-12" (несколько пересылок сразу — списком: ["AD-12", "AD-13"]). Так владелец увидит, что пересылка дошла. Старые номера AB-… тоже принимаются.
+- message_id — глобальный UUID сообщения, не локальный display_id AD-n. При ответе используйте неизменный task_id задания.
+- ack — если переслали «[Agent Desk] message_id: <UUID>», в первом маркере working укажите "ack": "<этот UUID>" (несколько — списком UUID). Это только квитанция получения: ACK не означает принятие задачи, выполнение или приёмку. Старые локальные AD-n/AB-n поддерживаются для совместимости, но не используйте их для новых сообщений между компьютерами.
 - note, result — необязательно: пояснение и путь к отчёту.
 
 Примеры одной строкой:
-{"agent":"Hoplite","session_id":"hop-m41-a","seq":1,"event_id":"hop-m41-a-1","state":"working","phase":"assigned","task":"M41: офлайн-сверка O6","ack":"AD-7"}
+{"agent":"Hoplite","session_id":"hop-m41-a","seq":1,"event_id":"hop-m41-a-1","state":"working","execution_state":"working","phase":"assigned","project_id":"22222222-2222-4222-8222-222222222222","device_id":"desk-example","assignment_epoch":2,"task_id":"f5a278d6-957e-4e21-ae85-04889d5227ad","task":"M41: офлайн-сверка O6","ack":"4922e0e3-c28f-4cfa-8a76-2bc264c39cf8"}
 {"agent":"Opus (2)","session_id":"o2-v7-b","seq":5,"event_id":"o2-v7-b-5","state":"waiting","waiting_for":"owner_input","task":"v7: откатывать PR #41 или чинить?"}
 {"agent":"Astra","session_id":"astra-1110","seq":2,"event_id":"astra-1110-2","state":"waiting","waiting_for":"model_limit","task":"Ревью clockfix","note":"лимит до 03:00"}`;
 }
@@ -645,6 +911,7 @@ async function copyText(text) {
     return true;
   } catch {
     // Plain-http pages on the phone have no Clipboard API.
+    const focus = document.activeElement;
     const ta = document.createElement("textarea");
     ta.value = text;
     ta.style.position = "fixed";
@@ -653,6 +920,7 @@ async function copyText(text) {
     ta.select();
     const ok = document.execCommand("copy");
     ta.remove();
+    if (focus?.isConnected) focus.focus();
     return ok;
   }
 }
@@ -705,6 +973,16 @@ function peersLive(canPair) {
 }
 
 const ACTIONS = {
+  "task-new"() { taskMutationDialog("assign", null); },
+  "task-context-roots"() { contextRootsDialog(); },
+  "mail-roots"() { mailRootsDialog(); },
+  async "mail-refresh"(e) {
+    const btn = e?.target?.closest("button");
+    if (btn) btn.disabled = true;
+    try { data.mail = await api("/api/mail"); renderMail(); }
+    catch (error) { $("#mail-sync").textContent = `Не удалось обновить список: ${error.message}. Показаны последние данные.`; }
+    finally { if (btn) btn.disabled = !online; }
+  },
   about() {
     dialog("О программе", `<div class="msg"><img src="${icon("network_normal_two_pcs-0")}" alt="">
       <div><b>Agent Desk ${esc(data.app?.version || "")}</b><br>Кто из агентов работает, кто ждёт ответа и что нужно переслать.<br><br>
@@ -713,6 +991,7 @@ const ACTIONS = {
   },
   howto() {
     const watches = data.config.watch;
+    if (!watches.length) { alertBox("Инструкция для агентов", "Сначала добавьте папку с маркерами через Файл → Папки с маркерами."); return; }
     const tabs = watches.map((w, i) => `<li role="tab" data-howto="${i}" aria-selected="${i === 0}"><a href="#">${esc(w.project || w.path)}</a></li>`).join("");
     dialog("Инструкция для агентов", `<p>Отправьте этот текст каждому агенту проекта один раз (или попросите ведущего разослать). У каждого проекта своя папка.</p>
       <menu role="tablist">${tabs}</menu>
@@ -841,7 +1120,7 @@ const ACTIONS = {
     if (!todo || todo.done_at || !peers.length) return;
     dialog("Отправить задачу", `<div class="msg"><img src="${icon("network_normal_two_pcs-0")}" alt=""><div>
       <p>${todoText(todo)}${todo.task ? `: ${esc(todo.task)}` : ""}</p>
-      <p>На какой компьютер отправить? Там задача появится в «Нужно сделать» с уведомлением, а здесь закроется с пометкой, куда ушла.</p>
+      <p>На какой компьютер отправить? Там сообщение появится на доске. Доставка и ACK — только квитанции; задача не завершится и не будет принята автоматически. Для передачи исполнения используйте вкладку «Задачи» → «Передать…».</p>
       <p id="send-error" class="bad"></p></div></div>
       <div class="buttons wrap">${peers.map((p, i) => `<button data-send="${i}"${i ? "" : ' class="default"'}>«${esc(p.name)}»${p.online === false ? " — не в сети" : ""}</button>`).join("")}<button data-close>Отмена</button></div>`,
     (node, close) => {
@@ -936,16 +1215,16 @@ const ACTIONS = {
       item = data.agents[selected.id];
     }
     if (!item) return;
-    history = data.events.filter((e) => e.project === item.project && e.agent === item.agent).slice(-8).reverse();
+    history = data.events.filter((e) => e.project === item.project && e.agent === item.agent && (!item.device_id || (e.device_id ? e.device_id === item.device_id : item.device_id === data.device_id))).slice(-8).reverse();
     const kv = (k, v) => (v ? `<dt>${k}</dt><dd>${esc(v)}</dd>` : "");
     const when = (iso) => iso && `${hhmm(iso)}, ${ago(iso)}`;
     const isTodo = selected.type === "todo";
     const head = isTodo
       ? `${kv("Задача", item.task)}${kv("Кому переслать", item.to)}${kv("Заметка", item.note)}${kv("Результат", item.result)}
-         ${kv("message_id", item.kind === "forward" && item.message_id)}${kv("Переслано", when(item.forwarded_at))}${kv("Подтверждено", when(item.acked_at))}
+         ${kv("task_id", item.task_id)}${kv("message_id", item.kind === "forward" && item.message_id)}${kv("Доставлено на доску", when(item.delivered_at))}${kv("Переслано", when(item.forwarded_at))}${kv("ACK — только получено", when(item.acked_at))}
          ${kv("Пришло с компьютера", item.from_device?.name)}${kv("Отправлено на", item.sent_to && `«${item.sent_to.name}», ${when(item.sent_to.at)}${item.sent_to.auto ? " (само)" : ""}`)}${kv("Не отправилось", !item.done_at && item.send_error)}`
       : `${kv("Состояние", stateLabel(item))}${kv("Этап", item.phase)}${kv("Задача", item.task)}${kv("Кому переслать", item.to)}
-         ${kv("Заметка", item.note)}${kv("Результат", item.result)}${kv("Сессия", item.session)}${kv("Обновлено", when(item.updated))}`;
+         ${kv("Заметка", item.note)}${kv("Результат", item.result)}${kv("Устройство", deviceLabel(item.device_id))}${kv("Сессия", item.session_id || item.session)}${kv("Обновлено", when(item.updated))}`;
     const msg = isTodo && item.message ? `<p>Текст для пересылки:</p><textarea readonly class="msg-text"></textarea>` : "";
     dialog(`${item.agent} — ${item.project}`, `<dl class="kv">${head}</dl>${msg}
       <div class="sunken-panel" style="max-height:160px"><table><thead><tr><th>Время</th><th>Событие</th><th>Задача</th></tr></thead><tbody>
@@ -977,6 +1256,7 @@ const ACTIONS = {
   forget() {
     if (selected?.type !== "agent") return;
     const a = data.agents[selected.id];
+    if (!a || (a.device_id && a.device_id !== data.device_id)) return;
     dialog("Убрать агента", `<div class="msg"><img src="${icon("msg_question-0")}" alt="">
       <div>Убрать «${esc(a.agent)}» (${esc(a.project)}) из списка? Он вернётся после следующего маркера.</div></div>
       <div class="buttons"><button id="yes">Да</button><button data-close>Нет</button></div>`,
@@ -1053,10 +1333,21 @@ document.addEventListener("click", (e) => {
   const action = e.target.closest("[data-action]");
   if (action && (data || action.dataset.action === "connect")) { e.preventDefault(); ACTIONS[action.dataset.action]?.(e); return; }
 
+  const taskAction = e.target.closest("[data-task-action]");
+  if (taskAction && data) {
+    const task = currentTask(taskAction.dataset.taskId);
+    if (!task || taskAction.disabled) return;
+    const action = taskAction.dataset.taskAction;
+    if (action === "details") taskDetails(task);
+    else if (action === "context") fetchTaskContext(task);
+    else taskMutationDialog(action, task);
+    return;
+  }
   const t = e.target.closest("[data-tab]");
   if (t) {
     e.preventDefault();
     tab = t.dataset.tab;
+    selected = null;
     localStorage.setItem("ad.view", tab);
     render();
     return;
@@ -1089,8 +1380,23 @@ document.addEventListener("mouseover", (e) => {
   }
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { $("#modal-layer").classList.add("hidden"); $("#modal-layer").innerHTML = ""; }
-  if (e.key === "Delete" && selected?.type === "todo") ACTIONS["done-selected"]();
+  if (e.key === "Escape") closeDialog();
+  const inDialog = !$("#modal-layer").classList.contains("hidden");
+  if (inDialog && e.key === "Tab") {
+    const controls = [...$("#modal-layer").querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]')].filter((n) => n.getClientRects().length);
+    const first = controls[0], last = controls[controls.length - 1];
+    if (first && e.shiftKey && (document.activeElement === first || !$("#modal-layer").contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+    else if (first && !e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+  const currentTab = e.target.closest('[role="tab"][data-tab], [role="tab"][data-project]');
+  if (currentTab && ["ArrowLeft", "ArrowRight", "Home", "End", "Enter", " "].includes(e.key)) {
+    e.preventDefault();
+    const tabs = [...currentTab.parentElement.querySelectorAll('[role="tab"]')];
+    const i = tabs.indexOf(currentTab);
+    const next = e.key === "Home" ? tabs[0] : e.key === "End" ? tabs[tabs.length - 1] : ["Enter", " "].includes(e.key) ? currentTab : tabs[(i + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
+    next.click(); next.focus();
+  }
+  if (!inDialog && !e.target.closest("input, textarea, select, [contenteditable]") && e.key === "Delete" && selected?.type === "todo") ACTIONS["done-selected"]();
 });
 
 // --- desktop app window (Electron: desktop/preload.js gives window.agentDesk) -----

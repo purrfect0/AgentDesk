@@ -74,10 +74,11 @@ test("board ids: agent message_id is only a reference", () => {
   put({ agent: "Opus (3)", state: "done", task: "t1", to: "Astra", message: "v1", message_id: "AB-1" });
   desk.scanOnce();
   const [t] = open(desk);
-  assert.equal(t.message_id, "AD-1");
+  assert.equal(t.display_id, "AD-1");
+  assert.match(t.message_id, /^[0-9a-f-]{36}$/);
   assert.equal(t.ref, "AB-1");
   assert.match(forwardText(t), /от: Opus \(3\) → Astra/);
-  assert.match(forwardText(t), /message_id: AD-1/);
+  assert.ok(forwardText(t).includes(`message_id: ${t.message_id}`));
 });
 
 test("probe 1: resubmitted result after forwarding becomes a new reminder", () => {
@@ -90,7 +91,7 @@ test("probe 1: resubmitted result after forwarding becomes a new reminder", () =
   const live = open(desk);
   assert.equal(live.length, 1);
   assert.equal(live[0].message, "v2");
-  assert.equal(live[0].supersedes, "AD-1");
+  assert.equal(live[0].supersedes, desk.state.todos[0].message_id);
   assert.equal(desk.state.todos[0].superseded_by, live[0].message_id);
   // the same message again does not create a third reminder
   put({ agent: "Opus (3)", state: "done", task: "t1", to: "Astra", message: "v2", event_id: "x" });
@@ -103,7 +104,8 @@ test("probes 2-3: lower-case and list acks close reminders, ids are unique", () 
   put({ agent: "Opus (3)", state: "done", task: "a", to: "Astra", message: "m1" });
   put({ agent: "Opus (1)", state: "done", task: "b", to: "Astra", message: "m2" });
   desk.scanOnce();
-  assert.deepEqual(open(desk).map((t) => t.message_id), ["AD-1", "AD-2"]);
+  assert.deepEqual(open(desk).map((t) => t.display_id), ["AD-1", "AD-2"]);
+  assert.notEqual(open(desk)[0].message_id, open(desk)[1].message_id);
   put({ agent: "Astra", state: "working", task: "review", ack: ["ad-1", "AD-2"] });
   desk.scanOnce();
   assert.equal(open(desk).length, 0);
@@ -243,7 +245,7 @@ test("HTTP security and API", async (t) => {
   desk.scanOnce();
   const full = await request(port, { path: "/api/state" });
   assert.equal(full.json.events[0].message, undefined, "event log carries no message bodies");
-  assert.ok(full.json.todos[0].forward_text.includes("AD-1"));
+  assert.ok(full.json.todos[0].forward_text.includes(full.json.todos[0].message_id));
   const same = await request(port, { path: `/api/state?since=${full.json.version}` });
   assert.deepEqual(same.json, { unchanged: true, version: full.json.version });
 
@@ -385,34 +387,39 @@ test("PC <-> laptop: pair with a code, send reminders, auto-send to the desk of 
     assert.equal(status.online, true);
     assert.ok(status.agents.AZS.includes("Astra"));
 
-    // By hand (also from the phone): the reminder goes to the laptop and is closed on the PC.
+    // Board delivery retains the message; receipt/completion are separate.
     pc.put({ agent: "Opus (3)", state: "done", task: "t1", to: "Astra", message: "v1" });
     pc.desk.scanOnce();
     const [t1] = open(pc.desk);
     assert.equal(t1.kind, "forward");
     const sent = await pc.desk.peers.local("send", { peer: laptopId, todos: [t1.id] }, fromPhone);
     assert.deepEqual(sent.body, { sent: 1, name: laptop.desk.peers.name });
-    assert.ok(t1.done_at);
+    assert.equal(t1.done_at, null);
+    assert.ok(t1.delivered_at);
     assert.equal(t1.sent_to.id, laptopId);
     const [got] = open(laptop.desk);
     assert.deepEqual([got.kind, got.agent, got.to, got.message, got.from_device.id], ["forward", "Opus (3)", "Astra", "v1", pcId]);
     assert.equal(got.warning, undefined, "Astra is known on the laptop");
-    assert.match(laptop.desk.state.alerts.at(-1).title, /^С «/);
-    assert.equal((await pc.desk.peers.local("send", { peer: laptopId, todos: [t1.id] }, onPc)).code, 400, "already sent");
+    assert.equal(got.message_id, t1.message_id, "global message identity survives the hop");
+    assert.equal(got.acked_at, null);
+    assert.equal((await pc.desk.peers.local("send", { peer: laptopId, todos: [t1.id] }, onPc)).code, undefined, "repeat delivery is idempotent");
+    assert.equal(open(laptop.desk).filter(t => t.message_id === t1.message_id).length, 1);
 
     // Auto-send: a reminder for an agent of the laptop goes there, without a popup on the PC.
     await pc.desk.peers.local("settings", { auto: true }, onPc);
     const seq = pc.desk.state.alert_seq;
     pc.put({ agent: "Opus (3)", state: "done", task: "t2", to: "astra", message: "v2" });
     pc.desk.scanOnce();
-    await until(() => open(pc.desk).length === 0 && open(laptop.desk).length === 2);
+    await until(() => pc.desk.state.todos.find(t => t.task === "t2")?.sent_to?.auto && open(laptop.desk).length === 2).catch(e => {
+      e.message += JSON.stringify({ todos: pc.desk.state.todos.map(t => ({task:t.task,routing:t.routing,error:t.send_error,sent:t.sent_to})), peer:pc.desk.peers.payload(), queue:pc.desk.peers.queue, rejected:pc.desk.state.rejected }); throw e;
+    });
     assert.equal(pc.desk.state.alert_seq, seq, "no popup on the PC");
     assert.equal(pc.desk.state.todos.at(-1).sent_to.auto, true);
     // A reminder for an agent of the PC itself stays on the PC.
     pc.put({ agent: "Lyra", state: "working", task: "t3" });
     pc.put({ agent: "Opus (3)", state: "done", task: "t3", to: "Lyra", message: "v3" });
     pc.desk.scanOnce();
-    assert.deepEqual(open(pc.desk).map((t) => t.to), ["Lyra"]);
+    assert.deepEqual(open(pc.desk).filter(t => !t.delivery_target).map((t) => t.to), ["Lyra"]);
   } finally {
     await pc.desk.stop();
     await laptop.desk.stop();

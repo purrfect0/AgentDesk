@@ -15,6 +15,7 @@ const http = require("node:http");
 const dgram = require("node:dgram");
 const os = require("node:os");
 const crypto = require("node:crypto");
+const { seal, unseal } = require("./sync.js");
 
 const DISCOVERY_PORT = 8099;
 const DEFAULT_PORT = 8098;
@@ -131,7 +132,7 @@ class PeerLink {
     this.requests = new Map(); // id -> {id, name, ip, base, key, code, time}: they ask to pair
     this.outgoing = new Map(); // key -> {key, code, base, id, name, time}: we asked them
     this.status = new Map(); // peer id -> {online, agents, error, checked}
-    this.queue = []; // ids of reminders to send on their own (config.peer_auto)
+    this.queue = desk.state.todos.filter(t => t.routing && !t.done_at).map(t => t.id); // recover pending auto-send after restart
     this.socket = null;
     this.timer = null;
     this.lastCheck = 0;
@@ -254,6 +255,7 @@ class PeerLink {
       this._bg("check", () => this.checkAll());
     }
     if (this.queue.length) this._bg("flush", () => this.flush());
+    for (const p of this.config.peers) this._bg(`sync:${p.id}`, () => this.sync(p.id));
   }
 
   async checkAll() {
@@ -266,7 +268,7 @@ class PeerLink {
     let s;
     let renamed = false;
     try {
-      const r = await call(p.base, "GET", "/api/p2p/info", null, p.key, 4000);
+      const r = await this.secure(p, { action: "info" });
       if (r.id !== p.id) throw new Error("по этому адресу теперь другой компьютер");
       const name = str(r.name, 60);
       if (name && name !== p.name) {
@@ -274,7 +276,7 @@ class PeerLink {
         renamed = true;
         this.desk._saveConfig();
       }
-      s = { online: true, agents: cleanAgents(r.agents), error: "" };
+      s = { ...before, online: true, agents: cleanAgents(r.agents), error: "", protocol: 3 };
     } catch (e) {
       const error = e.status === 403 ? `«${p.name}» больше не знает этот компьютер: удалите его и подключите заново` : e.message;
       s = { online: false, agents: (before && before.agents) || {}, error };
@@ -371,29 +373,33 @@ class PeerLink {
 
   // --- reminders ---
 
-  /** Send reminders to a paired desk; here they are closed with a note where they went. */
+  /** Send reminders with durable peer receipts; board delivery never completes the task. */
   async send(peerId, ids, auto = false) {
     const p = this.peer(peerId);
     if (!p) throw fail("этот компьютер не подключён");
     const todos = ids.map((id) => this.desk.state.todos.find((t) => t.id === id)).filter((t) => t && !t.done_at);
     if (!todos.length) throw fail("нечего отправлять: задача уже закрыта");
-    const items = todos.map((t) => ({
-      kind: t.kind, project: t.project, agent: t.agent, to: t.to, task: t.task, note: t.note, result: t.result,
-      waiting_for: t.waiting_for, message: t.message, message_id: t.message_id, created: t.created,
-    }));
     try {
-      await call(p.base, "POST", "/api/p2p/inbox", { from: { id: this.config.device_id, name: this.name }, todos: items }, p.key);
+      this.desk._saveState();
+      const events = todos.map(t => this.desk.sync.journal.events.findLast(ev => ev.type === "todo" && ev.entity_id === t.message_id)).filter(Boolean);
+      const r = await this.secure(p, { action: "events", cursor: 0, events, mail_cursor: 0 });
+      if (!Array.isArray(r.receipts) || events.some(ev => !r.receipts.includes(ev.id))) throw fail("получатель не подтвердил сохранение всех сообщений");
+      this.desk.sync.receive(r.events || []);
     } catch (e) {
       this.status.set(p.id, { agents: {}, ...this.status.get(p.id), online: false, error: e.message, checked: nowIso() });
       this._changed();
       throw fail(`«${p.name}» не отвечает: ${e.message}`);
     }
     const now = nowIso();
-    for (const t of todos) {
+    for (const original of todos) {
+      const t = this.desk.state.todos.find(row => row.message_id === original.message_id);
+      if (!t) continue;
       t.sent_to = { id: p.id, name: p.name, at: now, auto };
+      t.delivery_target = p.id; t.delivered_at ||= now;
       delete t.routing;
       t.updated = now;
-      this.desk._close(t, now, auto);
+      // Board delivery is not an agent receipt or task completion.
+
     }
     this.desk._commit();
     return { sent: todos.length, name: p.name };
@@ -402,6 +408,17 @@ class PeerLink {
   /** config.peer_auto: the one online paired desk where the addressee works, if it is unknown here. */
   routeFor(t) {
     if (!this.config.peer_auto || t.kind !== "forward" || !t.to) return null;
+    const tasks = Object.values(this.desk.state.tasks || {});
+    const current = this.desk.state.tasks?.[t.task_id];
+    if (current?.assignment && compact(current.assignment.agent) === compact(t.to)) {
+      return current.assignment.device_id === this.config.device_id ? null : this.peer(current.assignment.device_id);
+    }
+    const active = tasks.filter(task => task.project === t.project && task.state !== "accepted" && compact(task.assignment?.agent) === compact(t.to));
+    const currentBindingIds = new Set(tasks.map(task => task.binding_id).filter(Boolean));
+    const bindings = Object.values(this.desk.state.bindings || {}).filter(b => currentBindingIds.has(b.id) && b.project === t.project && compact(b.agent) === compact(t.to));
+    const devices = [...new Set((active.length ? active.map(task => task.assignment.device_id) : bindings.map(b => b.device_id)).filter(Boolean))];
+    if (devices.length > 1) { t.warning = "Адресат назначен на несколько устройств: выберите конкретную задачу/устройство."; return null; }
+    if (devices.length === 1) return devices[0] === this.config.device_id ? null : this.peer(devices[0]);
     if (this.desk.knownAgents(t.project).some((n) => compact(n) === compact(t.to))) return null;
     const hits = this.config.peers.filter((p) => {
       const s = this.status.get(p.id);
@@ -425,12 +442,109 @@ class PeerLink {
       try {
         await this.send(t.routing.id, [t.id], true);
       } catch (e) {
-        delete t.routing; // it stays here: the owner forwards it himself
         t.send_error = e.message;
-        this.desk._remind(t);
+        if (!this.queue.includes(t.id)) this.queue.push(t.id);
         this.desk._commit();
+        break; // retry on the next tick, never spin while the peer is offline
       }
     }
+  }
+
+  async secure(p, payload) {
+    const r = await call(p.base, "POST", "/api/p2p/sync", { from: this.config.device_id, packet: seal(payload, p.key) }, null, 8000);
+    return unseal(r.packet, p.my_key);
+  }
+
+  async sync(peerId) {
+    const p = this.peer(peerId);
+    if (!p) throw fail("компьютер не подключён");
+    try {
+      this.desk.mail.scan(); this.desk._saveState();
+      for (let batch = 0; batch < 5; batch++) {
+        const j = this.desk.sync.journal;
+        j.mail_cursors ??= {};
+        const page = this.desk.sync.page(j.sent[p.id] || 0);
+        const r = await this.secure(p, { action: "events", cursor: j.cursors[p.id] || 0, journal: j.peer_journals[p.id], events: page.events, mail_cursor: j.mail_cursors[p.id] || 0 });
+        if (!Array.isArray(r.receipts) || page.events.some(ev => !r.receipts.includes(ev.id))) throw fail("нет долговечной квитанции по всем событиям");
+        this.desk.sync.receive(r.events || []);
+        const current = this.desk.sync.journal;
+        const reset = current.peer_journals[p.id] && current.peer_journals[p.id] !== r.journal;
+        current.sent[p.id] = reset ? 0 : page.cursor; current.cursors[p.id] = r.cursor;
+        current.peer_journals[p.id] = r.journal;
+        current.mail_cursors ??= {}; current.mail_cursors[p.id] = r.mail_cursor || 0;
+        for (const ev of page.events) if (ev.type === "todo" && !ev.deleted) {
+          const t = this.desk.state.todos.find(t => t.message_id === ev.entity_id);
+          if (t && !t.delivered_at) t.delivered_at = nowIso();
+        }
+        this.desk._saveState();
+        const old = this.status.get(p.id) || {};
+        this.status.set(p.id, { ...old, online: true, agents: cleanAgents(r.agents), error: "", checked: nowIso(), synced: nowIso(), protocol: 3 });
+        await this.syncMail(p, r.mail || []);
+        if (!reset && !page.more && !r.more && !r.mail_more) break;
+      }
+      delete this.desk.sync.journal.errors[p.id]; this._changed();
+      return { ok: true, synced: this.status.get(p.id)?.synced };
+    } catch (e) {
+      const text = e.status === 404 ? "для общей почты обновите AgentDesk на этом компьютере до 2.3.0" : e.message;
+      this.desk.sync.journal.errors[p.id] = text;
+      const old = this.status.get(p.id) || {};
+      this.status.set(p.id, { ...old, error: text, checked: nowIso(), online: e.status ? true : false });
+      this._changed(); throw e;
+    }
+  }
+
+  async syncMail(p, manifest) {
+    if (!Array.isArray(manifest) || manifest.length > 100) throw fail("неверный список почты");
+    const local = this.desk.mail.manifest();
+    this.desk.sync.journal.mail_received ??= {};
+    const roots = this.desk.mail.payload().roots || [];
+    for (const item of manifest) {
+      if (!roots.some(root => root.project === item.project)) continue;
+      if (local.some(f => f.project === item.project && f.path === item.path && f.sha256 === item.sha256)) continue;
+      const receivedKey = `${p.id}:${item.project}:${item.path}`;
+      if (this.desk.sync.journal.mail_received[receivedKey] === item.sha256 && local.some(f => f.project === item.project && f.sha256 === item.sha256)) continue;
+      let offset = 0;
+      while (offset < item.size || offset === 0) {
+        const r = await this.secure(p, { action: "mail-chunk", file: { project: item.project, path: item.path, sha256: item.sha256, offset } });
+        const chunk = r.chunk;
+        if (!chunk || chunk.offset !== offset || chunk.sha256 !== item.sha256 || chunk.total !== item.size) throw fail("неверный фрагмент почты");
+        await this.desk.mail.acceptChunk(p, { ...item, ...chunk, previous_hash: item.previous_hash });
+        const next = chunk.next ?? offset + Buffer.from(chunk.data || "", "base64").length;
+        if (next <= offset && item.size > 0) throw fail("пустой фрагмент почты");
+        offset = next; if (offset >= item.size) break;
+      }
+      this.desk.sync.journal.mail_received[receivedKey] = item.sha256;
+      this.desk._saveState();
+    }
+  }
+
+  secureReceive(body) {
+    const p = this.peer(body.from);
+    if (!p) throw Object.assign(fail("неизвестное устройство"), { status: 403 });
+    const value = unseal(body.packet, p.my_key);
+    let result;
+    if (value.action === "info") {
+      result = { id: this.config.device_id, name: this.name, agents: this.desk.agentDirectory(), protocol: 3 };
+    } else if (value.action === "events") {
+      const receipts = this.desk.sync.receive(value.events || []);
+      const page = this.desk.sync.page(value.journal === this.desk.sync.journal.id ? (value.cursor || 0) : 0);
+      this.desk.mail.scan();
+      const all = this.desk.mail.manifest();
+      const start = Number.isSafeInteger(value.mail_cursor) && value.mail_cursor >= 0 && value.mail_cursor < all.length ? value.mail_cursor : 0;
+      const mail = []; let mailBytes = 0;
+      for (const item of all.slice(start, start + 100)) {
+        const bytes = Buffer.byteLength(JSON.stringify(item));
+        if (mail.length && mailBytes + bytes > 30000) break;
+        mail.push(item); mailBytes += bytes;
+      }
+      const next = start + mail.length;
+      result = { ...page, journal: this.desk.sync.journal.id, receipts, mail, mail_cursor: next < all.length ? next : 0, mail_more: next < all.length,
+        id: this.config.device_id, name: this.name, agents: this.desk.agentDirectory() };
+      this.desk._saveState();
+    } else if (value.action === "mail-chunk") {
+      result = { chunk: this.desk.mail.readChunk(value.file || {}) };
+    } else throw Object.assign(fail("неизвестное действие синхронизации"), { status: 400 });
+    return { body: { packet: seal(result, p.key) } };
   }
 
   // --- HTTP ---
@@ -443,6 +557,7 @@ class PeerLink {
   /** Requests of other desks (before the phone/UI key check of Desk._handle). */
   p2p(req, url, body) {
     const route = url.pathname.slice("/api/p2p/".length);
+    if (req.method === "POST" && route === "sync") return this.secureReceive(body);
     if (req.method === "POST" && route === "hello") return this._hello(req, body);
     if (req.method === "POST" && route === "welcome") return this._welcome(req, body);
     if (req.method === "GET" && route === "whoami") {
@@ -454,11 +569,12 @@ class PeerLink {
     const p = this._peerOf(req);
     if (!p) return { code: 403, body: { error: "этот компьютер не подключён" } };
     if (req.method === "GET" && route === "info") {
-      return { body: { id: this.config.device_id, name: this.name, version: this.desk.version, agents: this.desk.agentDirectory() } };
+      return { body: { id: this.config.device_id, name: this.name, version: this.desk.version, protocol: 3, agents: this.desk.agentDirectory() } };
     }
     if (req.method === "POST" && route === "inbox") {
-      const items = Array.isArray(body.todos) ? body.todos.slice(0, MAX.items) : [];
-      return { body: { ok: true, added: this.desk.receiveTodos(p, items) } };
+      const items = Array.isArray(body.todos) ? body.todos : [];
+      const added = this.desk.receiveTodos(p, items);
+      return { body: { ok: true, added, receipts: items.map(t => t.message_id) } };
     }
     return { code: 404, body: { error: "not found" } };
   }
@@ -515,9 +631,10 @@ class PeerLink {
       lan: this.desk.lanEnabled,
       discovery: !!this.socket,
       auto: c.peer_auto,
+      sync: { enabled: true, protocol: 3, events: this.desk.state.sync?.events?.length || 0, errors: this.desk.state.sync?.errors || {} },
       peers: c.peers.map((p) => {
         const s = this.status.get(p.id) || {};
-        return { id: p.id, name: p.name, base: p.base, online: s.online ?? null, error: s.error || "", agents: s.agents || {}, checked: s.checked || null };
+        return { id: p.id, name: p.name, base: p.base, online: s.online ?? null, error: s.error || "", agents: s.agents || {}, checked: s.checked || null, synced: s.synced || null, protocol: s.protocol || null };
       }),
       nearby: [...this.nearby.values()].filter((n) => !this.peer(n.id)).map(({ id, name, ip, port }) => ({ id, name, ip, port })),
       requests: [...this.requests.values()].map(({ id, name, ip, code, time }) => ({ id, name, ip, code, time })),
