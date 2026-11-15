@@ -11,7 +11,7 @@ persist Desk state itself.
 const { MailStore } = require('./mail');
 const mail = new MailStore(desk); // config and state must already be loaded
 if (mail.scan()) desk._saveState(); // Desk owns durable state persistence
-const payload = mail.payload();   // { roots, files, errors }
+const payload = mail.payload();   // { roots, files, errors, mode }
 const manifest = mail.manifest(); // [{ project, path, sha256, size, previous_hash? }]
 const part = mail.readChunk({ project, path, sha256, offset: 0 });
 const result = mail.acceptChunk(peer, { project, path, sha256, previous_hash,
@@ -52,7 +52,16 @@ plain directory. A project maps to one root; duplicates are deduplicated, while
 ambiguous/overlapping rows produce visible configuration errors and are skipped.
 Without `mail_roots`, inference considers only existing `monitor/inbox` watch
 paths and their existing `../../mail` sibling. It never creates inferred roots.
-Configuration errors are visible in `payload().errors`.
+For a paired incoming manifest, `ensureIncomingRoot(project, fileMetadata)` may
+create a bounded root under `desk.dataDir/mail/project-<hash>` only when no explicit
+`mail_roots` is set. Project/path/hash/size are validated before creation; symlinked
+ancestors are rejected. These app-owned mappings are stored in local
+`state.mail_incoming_roots`, not replicated config. Desk persists them with state.
+The local-only `/api/mail/config` action `{automatic:true}` explicitly restores
+this automatic mode; peers cannot override an owner's manual list or opt-out.
+`diagnostics()` is the peer-safe view: mode, project names, file count and error
+codes, without absolute paths. Configuration errors remain visible locally in
+`payload().errors`.
 
 Only regular files with safe relative POSIX paths are shared. Path depth/length,
 Windows device names and alternate streams, encoded separators, traversal,

@@ -546,7 +546,7 @@ function renderMail() {
   $("#mail-sync").textContent = syncDescription();
   const syncErrors = Object.entries(data.link?.sync?.errors || {}).map(([id, error]) => ({ project: (data.link?.peers || []).find((p) => p.id === id)?.name || "Устройство", message: typeof error === "string" ? error : "ошибка синхронизации" }));
   patch($("#mail-errors"), [...(mail?.errors || []), ...syncErrors].map((e) => `<p class="peer-warn">${esc(typeof e === "string" ? e : `${e.project || "Проект"}: ${e.error || e.message || e.status || "ошибка сканирования"}`)}${e.path ? ` · <code>${esc(relativeMailPath(e.path))}</code>` : ""}</p>`).join(""));
-  patch($("#mail-peers"), (data.link?.peers || []).map((p) => `<p class="sub" data-key="sync-peer:${esc(p.id)}">${esc(p.name)} · ${esc(p.synced ? `последняя сверка ${ago(p.synced)}` : "сверка пока не подтверждена")}${p.error ? ` · ${esc(p.error)}` : ""}</p>`).join(""));
+  patch($("#mail-peers"), (data.link?.peers || []).map((p) => `<p class="sub" data-key="sync-peer:${esc(p.id)}">${esc(p.name)} · ${esc(p.synced ? `последняя сверка ${ago(p.synced)}` : "сверка пока не подтверждена")}${p.mail?.mode === "disabled" ? " · файловая почта выключена" : p.mail ? ` · папок почты: ${Array.isArray(p.mail.projects) ? p.mail.projects.length : 0}, файлов: ${esc(p.mail.files ?? "—")}` : " · диагностика почты ещё не получена"}${p.error ? ` · ${esc(p.error)}` : ""}</p>`).join(""));
   if (!mail) { patch($("#mail-list"), '<p class="empty">Сервер ещё не поддерживает общие файлы проектов.</p>'); return; }
   const files = (mail.files || []).filter(inProject);
   const roots = (mail.roots || []).filter(inProject);
@@ -554,13 +554,17 @@ function renderMail() {
   patch($("#mail-list"), projects.length ? projects.map((p) => {
     const rows = files.filter((f) => f.project === p).sort((a, b) => String(a.path).localeCompare(String(b.path)));
     return `<section class="mail-project" data-key="mail:${esc(p)}"><h2>${esc(p)} <small>· папок: ${roots.filter((r) => r.project === p).length}</small></h2>${rows.length ? `<table class="mail-table"><thead><tr><th>Файл (относительно общей папки)</th><th>SHA-256 / статус</th><th>Размер</th></tr></thead><tbody>${rows.map((f) => `<tr data-key="file:${esc(`${f.project}/${f.path}`)}"><td><code>${esc(relativeMailPath(f.path))}</code></td><td><code class="file-hash">${esc(f.sha256 || "SHA не указан")}</code><span class="sub">${esc(f.status || "в локальном индексе; получение другим устройством не подтверждено")}</span></td><td>${esc(f.size ?? "—")} Б</td></tr>`).join("")}</tbody></table>` : '<p class="empty">В общей папке пока нет подходящих файлов. Секреты, скрытые и системные файлы исключаются.</p>'}</section>`;
-  }).join("") : '<p class="empty">Общие папки не настроены. На этом компьютере выберите «Папки…». Автоматически используются только существующие проектные mail рядом с monitor/inbox.</p>');
+  }).join("") : `<p class="empty">${mail.mode === "disabled" ? "Файловая почта выключена. В «Папки…» включите автоматический приём или выберите папку проекта." : mail.mode === "auto" ? "Папка приёма будет создана автоматически при получении файлов от связанного компьютера." : "Общие папки не настроены или недоступны. Проверьте настройку «Папки…» и локальные пути."}</p>`);
 }
 function mailRootsDialog() {
   if (!online || !isLocal || AD_HOST.kind === "mobile") { alertBox("Папки общей почты", "Эта настройка доступна только локально на компьютере Agent Desk."); return; }
   if (!data.mail) { alertBox("Папки общей почты", "Сервер ещё не поддерживает настройку общих файлов."); return; }
-  dialog("Общие папки — только этот компьютер", '<p>Настройка локальных путей не передаётся другим устройствам. Выбирайте только папку общих файлов проекта, не домашнюю папку целиком. Это не SMTP/IMAP. Сохранение пустого списка отключает явно заданные папки.</p><form id="mail-roots-form"><div id="mail-root-rows"></div><button type="button" id="mail-root-add">Добавить папку</button><p id="mail-root-error" class="bad" role="status"></p><div class="buttons"><button type="submit" id="mail-root-save">Сохранить</button><button type="button" data-close>Отмена</button></div></form>', (node) => {
+  dialog("Общие папки — только этот компьютер", '<p>Настройка локальных путей не передаётся другим устройствам. Выбирайте только папку общих файлов проекта, не домашнюю папку целиком. Это не SMTP/IMAP. Сохранение пустого списка отключает явно заданные папки.</p><form id="mail-roots-form"><div class="field-row"><input type="checkbox" id="mail-auto"><label for="mail-auto">Автоматически принимать почту новых проектов в папку AgentDesk</label></div><fieldset id="mail-manual"><legend>Папки, заданные вручную</legend><div id="mail-root-rows"></div><button type="button" id="mail-root-add">Добавить папку</button></fieldset><p id="mail-root-error" class="bad" role="status"></p><div class="buttons"><button type="submit" id="mail-root-save">Сохранить</button><button type="button" data-close>Отмена</button></div></form>', (node) => {
     let rowId = 0;
+    const automatic = node.querySelector("#mail-auto");
+    automatic.checked = data.mail.mode === "auto";
+    const toggle = () => { node.querySelector("#mail-manual").disabled = automatic.checked; node.querySelector("#mail-manual").classList.toggle("hidden", automatic.checked); };
+    automatic.onchange = toggle; toggle();
     const add = (root = {}) => {
       const i = rowId++;
       node.querySelector("#mail-root-rows").insertAdjacentHTML("beforeend", `<fieldset class="mail-root-row"><legend>Общая папка</legend><div class="field-row-stacked"><label for="mail-project-${i}">Проект</label><input id="mail-project-${i}" data-root-project type="text" required maxlength="160" value="${esc(root.project)}"></div><div class="field-row-stacked"><label for="mail-path-${i}">Локальный абсолютный путь</label><input id="mail-path-${i}" data-root-path type="text" required value="${esc(root.path)}" autocomplete="off" spellcheck="false"></div><button type="button" data-root-remove>Убрать из настройки</button></fieldset>`);
@@ -574,7 +578,7 @@ function mailRootsDialog() {
       if (!online) { err.textContent = "Нет связи: настройка не отправлена."; return; }
       const roots = [...node.querySelectorAll(".mail-root-row")].map((r) => ({ project: r.querySelector("[data-root-project]").value.trim(), path: r.querySelector("[data-root-path]").value.trim() }));
       btn.disabled = true; err.textContent = "Сохраняю локальную настройку…";
-      try { await api("/api/mail/config", { roots }); await poll(); if (node.isConnected) closeDialog(); }
+      try { await api("/api/mail/config", automatic.checked ? { automatic: true } : { roots }); await poll(); if (node.isConnected) closeDialog(); }
       catch (error) { if (node.isConnected) err.textContent = `Не сохранено: ${error.message}`; }
       finally { if (node.isConnected) btn.disabled = false; }
     };

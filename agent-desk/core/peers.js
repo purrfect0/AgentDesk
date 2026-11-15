@@ -276,7 +276,7 @@ class PeerLink {
         renamed = true;
         this.desk._saveConfig();
       }
-      s = { ...before, online: true, agents: cleanAgents(r.agents), error: "", protocol: 3 };
+      s = { ...before, online: true, agents: cleanAgents(r.agents), error: "", protocol: 3, mail: r.mail_status || null };
     } catch (e) {
       const error = e.status === 403 ? `«${p.name}» больше не знает этот компьютер: удалите его и подключите заново` : e.message;
       s = { online: false, agents: (before && before.agents) || {}, error };
@@ -478,7 +478,7 @@ class PeerLink {
         }
         this.desk._saveState();
         const old = this.status.get(p.id) || {};
-        this.status.set(p.id, { ...old, online: true, agents: cleanAgents(r.agents), error: "", checked: nowIso(), synced: nowIso(), protocol: 3 });
+        this.status.set(p.id, { ...old, online: true, agents: cleanAgents(r.agents), error: "", checked: nowIso(), synced: nowIso(), protocol: 3, mail: r.mail_status || null });
         await this.syncMail(p, r.mail || []);
         if (!reset && !page.more && !r.more && !r.mail_more) break;
       }
@@ -499,7 +499,11 @@ class PeerLink {
     this.desk.sync.journal.mail_received ??= {};
     const roots = this.desk.mail.payload().roots || [];
     for (const item of manifest) {
-      if (!roots.some(root => root.project === item.project)) continue;
+      if (!roots.some(root => root.project === item.project)) {
+        const incoming = this.desk.mail.ensureIncomingRoot(item.project, item);
+        if (!incoming) continue;
+        roots.push(incoming);
+      }
       if (local.some(f => f.project === item.project && f.path === item.path && f.sha256 === item.sha256)) continue;
       const receivedKey = `${p.id}:${item.project}:${item.path}`;
       if (this.desk.sync.journal.mail_received[receivedKey] === item.sha256 && local.some(f => f.project === item.project && f.sha256 === item.sha256)) continue;
@@ -524,7 +528,7 @@ class PeerLink {
     const value = unseal(body.packet, p.my_key);
     let result;
     if (value.action === "info") {
-      result = { id: this.config.device_id, name: this.name, agents: this.desk.agentDirectory(), protocol: 3 };
+      result = { id: this.config.device_id, name: this.name, agents: this.desk.agentDirectory(), protocol: 3, mail_status: this.desk.mail.diagnostics() };
     } else if (value.action === "events") {
       const receipts = this.desk.sync.receive(value.events || []);
       const page = this.desk.sync.page(value.journal === this.desk.sync.journal.id ? (value.cursor || 0) : 0);
@@ -539,7 +543,7 @@ class PeerLink {
       }
       const next = start + mail.length;
       result = { ...page, journal: this.desk.sync.journal.id, receipts, mail, mail_cursor: next < all.length ? next : 0, mail_more: next < all.length,
-        id: this.config.device_id, name: this.name, agents: this.desk.agentDirectory() };
+        id: this.config.device_id, name: this.name, agents: this.desk.agentDirectory(), mail_status: this.desk.mail.diagnostics() };
       this.desk._saveState();
     } else if (value.action === "mail-chunk") {
       result = { chunk: this.desk.mail.readChunk(value.file || {}) };
@@ -634,7 +638,7 @@ class PeerLink {
       sync: { enabled: true, protocol: 3, events: this.desk.state.sync?.events?.length || 0, errors: this.desk.state.sync?.errors || {} },
       peers: c.peers.map((p) => {
         const s = this.status.get(p.id) || {};
-        return { id: p.id, name: p.name, base: p.base, online: s.online ?? null, error: s.error || "", agents: s.agents || {}, checked: s.checked || null, synced: s.synced || null, protocol: s.protocol || null };
+        return { id: p.id, name: p.name, base: p.base, online: s.online ?? null, error: s.error || "", agents: s.agents || {}, checked: s.checked || null, synced: s.synced || null, protocol: s.protocol || null, mail: s.mail || null };
       }),
       nearby: [...this.nearby.values()].filter((n) => !this.peer(n.id)).map(({ id, name, ip, port }) => ({ id, name, ip, port })),
       requests: [...this.requests.values()].map(({ id, name, ip, code, time }) => ({ id, name, ip, code, time })),

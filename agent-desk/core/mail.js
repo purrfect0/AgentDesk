@@ -1,7 +1,8 @@
 "use strict";
 /**
- * Local, opt-in mailbox files. No transport, config persistence or state writes:
- * Desk owns those. All remote paths are relative to an already configured root.
+ * Local mailbox files under configured/inferred roots or bounded app-owned incoming roots.
+ * No transport, config persistence or state writes: Desk owns those.
+ * All remote file paths stay relative to validated mailbox roots.
  */
 const fs = require("node:fs");
 const path = require("node:path");
@@ -164,6 +165,15 @@ class MailStore {
           errors.push({ code: e.code || "MAIL_ROOT", project: watcher.project || "", message: "Unsafe inferred mailbox root" });
         }
       }
+      for (const generated of (Array.isArray(this.desk.state.mail_incoming_roots) ? this.desk.state.mail_incoming_roots : []).slice(0, LIMITS.roots)) {
+        try {
+          const project = projectName(generated.project);
+          const expected = path.join(path.resolve(this.desk.dataDir), "mail", `project-${digest(project).slice(0, 16)}`);
+          const normalize = value => process.platform === "win32" ? value.toLowerCase() : value;
+          if (normalize(path.resolve(generated.path || "")) !== normalize(expected)) throw fail("MAIL_ROOT", "Unexpected incoming mailbox root");
+          if (!candidates.some(root => root.project === project)) candidates.push({ project, path: expected });
+        } catch (e) { errors.push({ code: e.code || "MAIL_ROOT", message: "Unsafe incoming mailbox root" }); }
+      }
     }
     if (candidates.length > LIMITS.roots) errors.push({ code: "MAIL_LIMIT", message: "Too many mailbox roots" });
     const roots = [];
@@ -187,6 +197,43 @@ class MailStore {
       }
     }
     return { roots, errors };
+  }
+
+  ensureIncomingRoot(project, file) {
+    project = projectName(project);
+    if (file) {
+      relativePath(file.path);
+      if (!HEX.test(file.sha256 || "") || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > LIMITS.file) throw fail("MAIL_CHUNK", "Invalid incoming mailbox manifest");
+    }
+    const configured = this._configuredRoots();
+    const existing = configured.roots.find(root => root.project === project);
+    if (existing) return existing;
+    // Explicit settings, including [], are an owner decision, never overridden by a peer.
+    if (Object.prototype.hasOwnProperty.call(this.desk.config, "mail_roots")) {
+      if (this.desk.config.mail_roots?.length) this._notice({ code: "MAIL_NOT_CONFIGURED", project, message: "No receiving root for this shared project; configure Mail folders" });
+      return null;
+    }
+    if (configured.roots.length >= LIMITS.roots) throw fail("MAIL_LIMIT", "Too many incoming mailbox projects");
+    const data = directorySafe(this.desk.dataDir);
+    const parent = path.join(data, "mail");
+    if (!lstatMaybe(parent)) { fs.mkdirSync(parent, { mode: 0o700 }); syncDirectory(data); }
+    directorySafe(parent);
+    const destination = path.join(parent, `project-${digest(project).slice(0, 16)}`);
+    if (!lstatMaybe(destination)) { fs.mkdirSync(destination, { mode: 0o700 }); syncDirectory(parent); }
+    directorySafe(destination);
+    const generated = Array.isArray(this.desk.state.mail_incoming_roots) ? this.desk.state.mail_incoming_roots : [];
+    this.desk.state.mail_incoming_roots = [...generated.filter(root => root.project !== project), { project, path: destination }].slice(-LIMITS.roots);
+    const root = this._configuredRoots().roots.find(row => row.project === project);
+    if (!root) throw fail("MAIL_ROOT", "Incoming mailbox root could not be validated");
+    return root;
+  }
+
+  diagnostics() {
+    const p = this.payload();
+    const explicit = Object.prototype.hasOwnProperty.call(this.desk.config, "mail_roots");
+    return { mode: explicit ? (Array.isArray(this.desk.config.mail_roots) && this.desk.config.mail_roots.length === 0 ? "disabled" : "configured") : "auto",
+      projects: p.roots.map(root => root.project), files: p.files.length,
+      errors: p.errors.map(e => ({ code: String(e.code || "MAIL_ERROR").slice(0, 40), project: String(e.project || "").slice(0, 60) })) };
   }
 
   _root(project) {
@@ -304,7 +351,8 @@ class MailStore {
 
   payload() {
     this.scan();
-    return { roots: this.roots.map((root) => ({ ...root })), files: this._rows(), errors: this.errors.map((error) => ({ ...error })) };
+    return { roots: this.roots.map((root) => ({ ...root })), files: this._rows(), errors: this.errors.map((error) => ({ ...error })),
+      mode: Object.prototype.hasOwnProperty.call(this.desk.config, "mail_roots") ? (Array.isArray(this.desk.config.mail_roots) && this.desk.config.mail_roots.length === 0 ? "disabled" : "configured") : "auto" };
   }
 
   _rows() {

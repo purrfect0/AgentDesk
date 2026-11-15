@@ -93,6 +93,20 @@ if (process.argv.includes("--serve")) {
     state.tasks[0].card_id = "<script>x</script>"; const unsafe = harness(state); unsafe.run("renderTasks()");
     assert.doesNotMatch(unsafe.root.querySelector("#task-list").innerHTML, /<script>/);
   });
+  test("automatic mail settings are explicit and paired diagnostics expose disabled mode", async () => {
+    const state = fixture(); state.mail.mode = "auto"; state.mail.roots = [];
+    state.link.peers[0].mail = { mode: "disabled", projects: [], files: 0 };
+    const h = harness(state); h.run('renderMail(); globalThis.__mailCalls = []; api = async (url, body) => { __mailCalls.push({url, body}); return {}; }; closeDialog = () => {}; mailRootsDialog();');
+    assert.match(h.root.querySelector("#mail-peers").innerHTML, /файловая почта выключена/);
+    const node = h.mounted.at(-1).node;
+    assert.equal(node.querySelector("#mail-auto").checked, true);
+    assert.equal(node.querySelector("#mail-manual").disabled, true);
+    await node.querySelector("#mail-roots-form").onsubmit({ preventDefault() {} });
+    assert.deepEqual(JSON.parse(h.run("JSON.stringify(__mailCalls[0])")), { url: "/api/mail/config", body: { automatic: true } });
+    node.querySelector("#mail-auto").checked = false; node.querySelector("#mail-auto").onchange();
+    await node.querySelector("#mail-roots-form").onsubmit({ preventDefault() {} });
+    assert.deepEqual(JSON.parse(h.run("JSON.stringify(__mailCalls[1].body)")), { roots: [] });
+  });
   test("one card per UUID, lifecycle independent of ACK, escaped task/receipt values", () => {
     const state = fixture(); state.tasks[0].title = '<img src=x onerror="alert(1)">'; state.tasks.push({ ...state.tasks[0] }); state.todos[0].message_id = '<script>x</script>';
     const h = harness(state); h.run("renderTasks()"); const html = h.root.querySelector("#task-list").innerHTML;

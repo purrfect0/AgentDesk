@@ -1205,6 +1205,11 @@ class Desk extends EventEmitter {
     }
     if (pathname === "/api/mail/config") {
       if (!auth.local) return { code: 403, body: { error: "папки почты меняются только на ПК" } };
+      if (body.automatic === true) {
+        delete this.config.mail_roots;
+        this._saveConfig(); this.mail.scan(); this._saveState(); this.emit("change");
+        return { body: this.mail.payload() };
+      }
       if (!Array.isArray(body.roots) || body.roots.length > 20) return { code: 400, body: { error: "roots должен быть списком до 20 папок" } };
       for (const r of body.roots) {
         if (!r || !r.project || !path.isAbsolute(r.path || "") || !fs.existsSync(r.path) || !fs.lstatSync(r.path).isDirectory() || fs.lstatSync(r.path).isSymbolicLink()) return { code: 400, body: { error: "нужны проект и существующая обычная папка" } };
