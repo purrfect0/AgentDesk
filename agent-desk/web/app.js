@@ -360,10 +360,15 @@ const deviceLabel = (id) => id === data?.device_id ? (data.link?.name || "это
 const currentTask = (id) => taskList().find((t) => t.task_id === id);
 const taskEpoch = (t) => Number(t?.assignment?.epoch ?? t?.assignment_epoch ?? 0);
 const taskReceiptRows = (t) => (data?.todos || []).filter((r) => r.task_id === t.task_id);
+function taskCardNumber(t) {
+  if (t.card_id) return t.card_id;
+  const row = taskReceiptRows(t).sort((a, b) => (a.id || 0) - (b.id || 0))[0];
+  return row ? (row.display_id || `AD-${row.id}`) : `ID ${String(t.task_id).slice(0, 8)}`;
+}
 function receiptsMarkup(t) {
   const rows = taskReceiptRows(t);
   if (!rows.length) return '<span class="sub">Сообщений и квитанций пока нет.</span>';
-  return rows.map((r) => `<li><code>${esc(r.message_id || r.display_id || `AD-${r.id}`)}</code>${r.to ? ` → ${esc(r.to)}` : ""} · ${[
+  return rows.map((r) => `<li><code>${esc(r.display_id || `AD-${r.id}`)}</code> · <code>${esc(r.message_id || "")}</code>${r.to ? ` → ${esc(r.to)}` : ""} · ${[
     ["delivered_at", "доставлено на доску"], ["forwarded_at", "переслано"], ["acked_at", "ACK: получено"], ["done_at", "напоминание закрыто"]
   ].filter(([k]) => r[k]).map(([k, title]) => `<span title="${esc(r[k])}">${title}</span>`).join(" · ") || "ожидает доставки"}</li>`).join("");
 }
@@ -380,7 +385,7 @@ function renderTasks() {
     const coordinator = canCoordinate(t);
     const readonly = !online ? "Нет связи — только просмотр" : !coordinator ? "Назначение и передача — на компьютере ведущего" : "";
     return `<article class="task-card" data-key="task:${esc(t.task_id)}">
-      <header><h2>${esc(t.title || t.task || "Без названия")}</h2><b class="task-badge task-${esc(Object.hasOwn(TASK_LABEL, t.state) ? t.state : "unknown")}">${esc(TASK_LABEL[t.state] || t.state || "неизвестно")}</b></header>
+      <header><h2><code aria-label="Номер карточки">${esc(taskCardNumber(t))}</code> — ${esc(t.title || t.task || "Без названия")}</h2><b class="task-badge task-${esc(Object.hasOwn(TASK_LABEL, t.state) ? t.state : "unknown")}">${esc(TASK_LABEL[t.state] || t.state || "неизвестно")}</b></header>
       <p class="sub">${esc(t.project)} · <code>${esc(t.task_id)}</code> · ${esc(ago(t.updated))}</p>
       <dl class="task-meta"><dt>Исполнитель</dt><dd>${esc(a.agent || "не назначен")} · ${esc(a.role || "роль не задана")}</dd><dt>Устройство / сессия</dt><dd><code>${esc(a.device_id || "—")} / ${esc(a.session_id || "—")}</code> · назначение #${taskEpoch(t)}</dd></dl>
       ${t.conflict ? `<p class="peer-warn">Конфликт задания: ${esc(typeof t.conflict === "string" ? t.conflict : "нужна сверка ведущим")}</p>` : ""}
@@ -392,7 +397,7 @@ function renderTasks() {
 function taskDetails(t) {
   const cp = t.checkpoint || {};
   const kv = (k, v) => v === undefined || v === null || v === "" ? "" : `<dt>${esc(k)}</dt><dd>${esc(typeof v === "object" ? JSON.stringify(v, null, 2) : v)}</dd>`;
-  dialog("Задача — подробности", `<h2 class="task-title">${esc(t.title || t.task)}</h2><dl class="kv">${kv("task_id", t.task_id)}${kv("project_id", t.project_id)}${kv("Состояние", TASK_LABEL[t.state] || t.state)}${kv("Ведущий (device_id)", t.coordinator_device_id)}${kv("Назначение", t.assignment)}${["repo", "branch", "commit", "report", "manifest", "next_step", "constraints", "skills"].map((k) => kv(k, cp[k])).join("")}</dl>
+  dialog("Задача — подробности", `<h2 class="task-title"><code>${esc(taskCardNumber(t))}</code> — ${esc(t.title || t.task)}</h2><dl class="kv">${kv("task_id", t.task_id)}${kv("project_id", t.project_id)}${kv("Состояние", TASK_LABEL[t.state] || t.state)}${kv("Ведущий (device_id)", t.coordinator_device_id)}${kv("Назначение", t.assignment)}${["repo", "branch", "commit", "report", "manifest", "next_step", "constraints", "skills"].map((k) => kv(k, cp[k])).join("")}</dl>
     <h3>Артефакты</h3>${listValues(t.artifacts).length ? `<ul class="receipt-list">${listValues(t.artifacts).map((a) => `<li><code>${esc(a.path)}</code> · ${esc(a.status || "не проверен")}<br><code>${esc(a.hash || a.sha256 || "SHA не указан")}</code></li>`).join("")}</ul>` : "<p>Артефактов пока нет.</p>"}
     <h3>История задачи</h3><ul class="receipt-list">${(t.history || []).slice(-12).reverse().map((h) => `<li>${esc(h.time || h.at || "")} · ${esc(TASK_LABEL[h.state] || h.action || h.state || "событие")}${h.note ? ` · ${esc(h.note)}` : ""}</li>`).join("") || "<li>Истории пока нет.</li>"}</ul><div class="buttons"><button data-close>Закрыть</button></div>`);
 }

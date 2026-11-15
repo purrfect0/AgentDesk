@@ -1,7 +1,7 @@
 # Builds the Agent Desk installers: Windows (.exe, Electron) and Android (.apk, Capacitor).
 # Artifacts: Actions -> run -> "AgentDesk-Windows" / "AgentDesk-Android".
-# A tag like agent-desk-v2.2.0 also publishes them as the GitHub Release "Agent Desk 2.2.0",
-# the notes come from the "## 2.2.0" section of CHANGELOG.md.
+# A tag like agent-desk-v2.3.0 also publishes them as the GitHub Release "Agent Desk 2.3.0",
+# the notes come from the matching version section of CHANGELOG.md.
 name: Agent Desk
 
 on:
@@ -28,8 +28,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Core tests
-        run: node --test --test-reporter=spec core/test/desk.test.js
+      - name: Install locked test dependencies (without install scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Core and agent interface tests
+        run: npm test
+      - name: Task and mailbox UI tests
+        run: node --test web/linked-ui.test.js
       - name: Cyrillic pixel font is up to date
         run: node scripts/make-font.js --check
       - name: Syntax of the window, phone and build scripts
@@ -46,15 +50,23 @@ jobs:
       - name: Win98 look (98.css + icons)
         run: node scripts/fetch-assets.js
       - name: Install Electron
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
       - name: Build installer
         run: npx electron-builder --win nsis --x64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Installer checksum
+        run: |
+          Get-ChildItem dist -Filter *.exe | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Set-Content -Path "$($_.FullName).sha256" -Encoding ascii
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: AgentDesk-Windows
-          path: agent-desk/dist/*.exe
+          path: |
+            agent-desk/dist/*.exe
+            agent-desk/dist/*.exe.sha256
           if-no-files-found: error
 
   android:
@@ -101,10 +113,13 @@ jobs:
           v=$(node -p "require('./mobile/package.json').version")
           mkdir -p dist
           cp mobile/android/app/build/outputs/apk/debug/app-debug.apk "dist/AgentDesk-$v.apk"
+          sha256sum "dist/AgentDesk-$v.apk" > "dist/AgentDesk-$v.apk.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: AgentDesk-Android
-          path: agent-desk/dist/*.apk
+          path: |
+            agent-desk/dist/*.apk
+            agent-desk/dist/*.apk.sha256
           if-no-files-found: error
 
   release:

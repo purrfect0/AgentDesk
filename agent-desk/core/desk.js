@@ -342,6 +342,7 @@ class Desk extends EventEmitter {
       };
     }
     this.mail = new MailStore(this);
+    this._numberTaskCards();
   }
 
   _load() {
@@ -433,7 +434,30 @@ class Desk extends EventEmitter {
     writeJsonAtomic(this.stateFile, this.state);
   }
 
+  _numberTaskCards() {
+    const s = this.state;
+    if (!s.task_card_ids || typeof s.task_card_ids !== "object" || Array.isArray(s.task_card_ids)) s.task_card_ids = {};
+    const used = new Set(Object.values(s.task_card_ids).filter(v => typeof v === "string"));
+    let next = Number.isSafeInteger(s.next_task_card_id) && s.next_task_card_id > 0 ? s.next_task_card_id : 1;
+    for (const label of used) if (/^AT-\d+$/.test(label)) next = Math.max(next, Number(label.slice(3)) + 1);
+    const tasks = Object.values(s.tasks || {}).sort((a, b) => String(a.created || "").localeCompare(String(b.created || "")) || a.task_id.localeCompare(b.task_id));
+    for (const task of tasks) {
+      if (s.task_card_ids[task.task_id]) continue;
+      const rows = s.todos.filter(t => t.task_id === task.task_id).sort((a, b) => a.id - b.id);
+      const linked = rows.map(t => t.display_id || `AD-${t.id}`).find(label => !used.has(label));
+      let label = linked;
+      if (!label) {
+        while (used.has(`AT-${next}`)) next++;
+        if (!Number.isSafeInteger(next)) throw new Error("исчерпан счётчик номеров задач");
+        label = `AT-${next++}`;
+      }
+      s.task_card_ids[task.task_id] = label; used.add(label);
+    }
+    s.next_task_card_id = next;
+  }
+
   _saveState() {
+    this._numberTaskCards();
     this.sync?.capture();
     this._bump();
     try {
@@ -861,7 +885,7 @@ class Desk extends EventEmitter {
       app: { name: "Agent Desk", version: VERSION, protocol: PROTOCOL },
       agents: { ...s.agents, ...Object.fromEntries(Object.entries(s.remote_agents || {}).map(([k, a]) => [`remote:${k}`, a])) },
       device_id: c.device_id,
-      tasks: this.tasks.list(), bindings: Object.values(s.bindings || {}),
+      tasks: this.tasks.list().map(t => ({ ...t, card_id: s.task_card_ids[t.task_id] })), bindings: Object.values(s.bindings || {}),
       mail: this.mail.payload(),
       todos: s.todos.map((t) => ({ ...t, forward_text: forwardText(t) })),
       events: s.events.slice(-LIMITS.payloadEvents).map(({ message, ...e }) => e),

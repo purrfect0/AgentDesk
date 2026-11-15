@@ -84,6 +84,15 @@ if (process.argv.includes("--serve")) {
     assert.match(h.root.querySelector("#todo-table tbody").innerHTML, /Synthetic|Переслать/);
     h.run('online = false; render()'); assert.equal(h.root.querySelector("#board-offline").classList.contains("hidden"), false); assert.match(h.root.querySelector("#board-offline").textContent, /последние данные/);
   });
+  test("task card number is visible before the title, with AD fallback and escaped aliases", () => {
+    const state = fixture(); state.tasks[0].card_id = "AT-42";
+    const h = harness(state); h.run("renderTasks()");
+    assert.match(h.root.querySelector("#task-list").innerHTML, /aria-label="Номер карточки">AT-42<\/code> — Проверить/);
+    delete state.tasks[0].card_id; const old = harness(state); old.run("renderTasks()");
+    assert.match(old.root.querySelector("#task-list").innerHTML, /Номер карточки">AD-7<\/code>/);
+    state.tasks[0].card_id = "<script>x</script>"; const unsafe = harness(state); unsafe.run("renderTasks()");
+    assert.doesNotMatch(unsafe.root.querySelector("#task-list").innerHTML, /<script>/);
+  });
   test("one card per UUID, lifecycle independent of ACK, escaped task/receipt values", () => {
     const state = fixture(); state.tasks[0].title = '<img src=x onerror="alert(1)">'; state.tasks.push({ ...state.tasks[0] }); state.todos[0].message_id = '<script>x</script>';
     const h = harness(state); h.run("renderTasks()"); const html = h.root.querySelector("#task-list").innerHTML;
