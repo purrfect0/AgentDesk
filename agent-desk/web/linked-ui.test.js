@@ -81,7 +81,7 @@ if (process.argv.includes("--serve")) {
       for (const id of ["agents", "log", "tasks", "mail"]) assert.equal(h.root.querySelector(`#${id}-view`).classList.contains("hidden"), id !== view);
     }
     assert.match(h.root.querySelector("#tabs").innerHTML, /Агенты/); assert.match(h.root.querySelector("#tabs").innerHTML, /Журнал/); assert.match(h.root.querySelector("#tabs").innerHTML, /aria-controls="tasks-view"/);
-    assert.match(h.root.querySelector("#todo-table tbody").innerHTML, /Synthetic|Переслать/);
+    assert.match(h.root.querySelector("#todo-table tbody").innerHTML, /Сообщение для/);
     h.run('online = false; render()'); assert.equal(h.root.querySelector("#board-offline").classList.contains("hidden"), false); assert.match(h.root.querySelector("#board-offline").textContent, /последние данные/);
   });
   test("task card number is visible before the title, with AD fallback and escaped aliases", () => {
@@ -107,14 +107,39 @@ if (process.argv.includes("--serve")) {
     await node.querySelector("#mail-roots-form").onsubmit({ preventDefault() {} });
     assert.deepEqual(JSON.parse(h.run("JSON.stringify(__mailCalls[1].body)")), { roots: [] });
   });
+  test("delivered messages wait quietly and closed cards never request agent launch", () => {
+    const h = harness();
+    assert.equal(h.run('needsAction({kind:"forward",delivered_at:"2026-11-16"})'), false);
+    assert.doesNotMatch(h.run('todoStatus({kind:"forward",delivered_at:"2026-11-16"})'), /нужен|запуск/i);
+    assert.equal(h.run('todoStatus({kind:"forward",done_at:"2026-11-16",delivered_at:"2026-11-16"})'), "закрыто");
+  });
+  test("primary task views show card number and friendly device/session, with UUIDs only in technical disclosure", () => {
+    const state = fixture(), t = state.tasks[0]; t.card_id = "AD-351"; t.assignment.device_id = "28b2c0078428334f"; t.assignment.session_id = "ad-ack-48a26097f3404eeb";
+    state.link.peers.push({id:t.assignment.device_id,name:"Рабочий ПК",online:true});
+    const h = harness(state); h.run("renderTasks()"); const html = h.root.querySelector("#task-list").innerHTML;
+    assert.match(html, /AD-351/); assert.match(html, /Рабочий ПК/);
+    assert.doesNotMatch(html.split('<details class="technical-details">')[0].replace(/<[^>]*>/g, ""), /28b2c0078428334f|ad-ack-48a26097f3404eeb|11111111-1111-4111/);
+    h.run("taskDetails(taskList()[0])"); const dialog = h.mounted.at(-1).html;
+    assert.match(dialog, /AD-351/); assert.match(dialog, /Технические данные/);
+    assert.doesNotMatch(dialog.split('<details class="technical-details">')[0], /11111111-1111-4111|28b2c0078428334f|ad-ack-/);
+  });
+  test("owner message details prefer AD number over technical task/message IDs", () => {
+    const h = harness(); h.run('selected={type:"todo",id:7}; ACTIONS.details()'); const html=h.mounted.at(-1).html;
+    assert.match(html,/AD-7/); assert.match(html,/Технические данные/);
+    assert.doesNotMatch(html.split('<details class="technical-details">')[0], /33333333-3333-4333|11111111-1111-4111/);
+  });
+  test("file mailbox is an optional menu, not a primary work tab", () => {
+    const h=harness();h.run("render()");assert.doesNotMatch(h.root.querySelector("#tabs").innerHTML,/Общая почта|tab-mail/);
+    assert.match(fs.readFileSync(path.join(__dirname,"index.html"),"utf8"),/data-action="file-tools"/);
+  });
   test("one card per UUID, lifecycle independent of ACK, escaped task/receipt values", () => {
     const state = fixture(); state.tasks[0].title = '<img src=x onerror="alert(1)">'; state.tasks.push({ ...state.tasks[0] }); state.todos[0].message_id = '<script>x</script>';
     const h = harness(state); h.run("renderTasks()"); const html = h.root.querySelector("#task-list").innerHTML;
-    assert.equal((html.match(/<article/g) || []).length, 1); assert.match(html, /сдана на проверку/); assert.match(html, /&lt;img/); assert.match(html, /&lt;script/); assert.doesNotMatch(html, /<script>/); assert.equal(h.run("data.todos.filter(needsAction).length"), 0);
+    assert.equal((html.match(/<article/g) || []).length, 1); assert.match(html, /сдана на проверку/); assert.match(html, /&lt;img/); assert.match(h.run("technicalDetails(data.todos[0])"), /&lt;script/); assert.doesNotMatch(html, /<script>/); assert.equal(h.run("data.todos.filter(needsAction).length"), 0);
     assert.equal(h.run('needsAction({ kind: "receipt" })'), false); assert.equal(h.run('needsAction({ kind: "reply" })'), true);
-    assert.equal(h.run('needsAction({ kind: "forward", delivered_at: "2026-11-16" })'), true);
+    assert.equal(h.run('needsAction({ kind: "forward", delivered_at: "2026-11-16" })'), false);
     assert.equal(h.run('needsAction({ kind: "forward", delivery_target: "fixture-laptop" })'), false);
-    assert.equal(h.run('needsAction({ kind: "forward", delivery_target: "fixture-pc", delivered_at: "2026-11-16" })'), true);
+    assert.equal(h.run('needsAction({ kind: "forward", delivery_target: "fixture-pc", delivered_at: "2026-11-16" })'), false);
   });
   test("replicated agents keep actual map keys and show device identity without cross-device selection collision", () => {
     const state = fixture(); const time = new Date().toISOString();

@@ -27,7 +27,7 @@ const TODO_ICON = { forward: "envelope_closed-1", reply: "msg_question-2", block
 const stateLabel = (a) => (a.state === "waiting" && WAIT_LABEL[a.waiting_for]) || STATE_LABEL[a.state] || a.state;
 // Forwarded-but-unconfirmed reminders stay visible but no longer need the owner.
 // Delivery/ACK receipts are quiet telemetry, never owner actions or task acceptance.
-const needsAction = (t) => !t.done_at && !t.quiet && !["receipt", "ack", "delivery"].includes(t.kind) && !(t.kind === "forward" && (t.forwarded_at || t.acked_at || (t.delivery_target && data?.device_id && t.delivery_target !== data.device_id)));
+const needsAction = (t) => !t.done_at && !t.quiet && !["receipt", "ack", "delivery"].includes(t.kind) && !(t.kind === "forward" && (t.delivered_at || t.forwarded_at || t.acked_at || (t.delivery_target && data?.device_id && t.delivery_target !== data.device_id)));
 const isForwardPending = (t) => t && !t.done_at && t.kind === "forward";
 const isLocal = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
 // Accent animations: --ph keeps the blink phase tied to the clock (12 s fits the 1 s and 2.4 s
@@ -147,24 +147,23 @@ function isStale(a) {
 
 function todoText(t) {
   const who = `<b>${esc(t.agent)}</b>`;
-  if (t.kind === "forward") return `Переслать <b class="to">${esc(t.to)}</b> работу от ${who}`;
+  if (t.kind === "forward") return t.delivered_at || t.acked_at || t.done_at ? `Сообщение для <b class="to">${esc(t.to)}</b> от ${who}` : `Переслать <b class="to">${esc(t.to)}</b> работу от ${who}`;
   if (t.kind === "reply") return `${who} ждёт вашего ответа`;
   if (t.kind === "limit") return `${who}: закончился лимит модели`;
   return `${who} заблокирован`;
 }
 
 function todoStatus(t) {
-  if (t.sent_to && t.done_at) return `отправлено → «${esc(t.sent_to.name)}»`;
-  if (t.routing && !t.done_at) return `отправляю → «${esc(t.routing.name)}»…`;
+  if (t.kind === "forward" && t.acked_at) return "получено агентом";
+  if (t.done_at) return "закрыто";
+  if (t.routing) return `отправляю → «${esc(t.routing.name)}»…`;
   if (t.kind === "forward") {
-    if (t.acked_at) return "ACK: получено (не приёмка)";
-    if (t.delivered_at) return t.delivery_target && t.delivery_target !== data?.device_id ? "доставлено на доску адресата; ждём ACK" : "на доске; <b>нужен запуск / ACK агента</b>";
-    if (t.delivery_target && t.delivery_target !== data?.device_id) return "ждём доставки на доску адресата";
-    if (t.forwarded_at) return "переслано, ждём подтверждения";
-    if (t.done_at) return "закрыто";
+    if (t.delivered_at) return "доставлено · ожидает получения";
+    if (t.delivery_target && t.delivery_target !== data?.device_id) return "ожидает доставки";
+    if (t.forwarded_at) return "переслано · ожидает получения";
     return "<b>не переслано</b>";
   }
-  return t.done_at ? "закрыто" : { reply: "<b>ждёт ответа</b>", limit: "<b>нужна новая сессия</b>", blocked: "<b>нужна помощь</b>" }[t.kind];
+  return { reply: "<b>ждёт ответа</b>", limit: "<b>нужна новая сессия</b>", blocked: "<b>нужна помощь</b>" }[t.kind] || "";
 }
 
 // PC <-> laptop (core/peers.js): which computer a reminder came from, why it was not sent.
@@ -180,8 +179,6 @@ function peerNote(t) {
 function allProjects() {
   const names = new Set(data.config.watch.map((w) => w.project).filter(Boolean));
   taskList().forEach((t) => names.add(t.project));
-  (data.mail?.roots || []).forEach((r) => names.add(r.project));
-  (data.mail?.files || []).forEach((f) => names.add(f.project));
   Object.values(data.agents).forEach((a) => names.add(a.project));
   data.todos.forEach((t) => names.add(t.project));
   return [...names].filter(Boolean).sort();
@@ -217,7 +214,7 @@ function render() {
   const agents = Object.entries(data.agents).map(([key, a]) => ({ ...a, _rowKey: key })).filter(inProject)
     .sort((a, b) => a.project.localeCompare(b.project) || a.first_seen.localeCompare(b.first_seen));
   const events = data.events.filter(inProject).reverse();
-  patch($("#tabs"), [["agents", "Агенты"], ["log", "Журнал"], ["tasks", "Задачи"], ["mail", "Общая почта"]].map(([id, name]) =>
+  patch($("#tabs"), [["agents", "Агенты"], ["log", "Журнал"], ["tasks", "Задачи"]].map(([id, name]) =>
     `<li role="tab" id="tab-${id}" tabindex="${id === tab ? 0 : -1}" data-key="v:${id}" data-tab="${id}" aria-controls="${id}-view" aria-selected="${id === tab}"><a href="#" tabindex="-1">${name}</a></li>`).join(""));
 
   const showLog = tab === "log";
@@ -241,7 +238,7 @@ function render() {
       <tr data-key="${esc(eventKey(e))}"><td class="c-ico"><img src="${icon(STATE_ICON[e.state])}" alt=""></td>
       <td class="nowrap">${hhmm(e.time)} <span class="sub">${esc(ago(e.time))}</span></td>
       <td>${esc(e.agent)}${e.device_id ? `<br><span class="sub">${esc(deviceLabel(e.device_id))}</span>` : ""}</td>
-      <td class="nowrap">${esc(stateLabel(e))}${e.to ? ` → ${esc(e.to)}` : ""}${e.ack ? ` (подтвердил ${esc(e.ack)})` : ""}</td>
+      <td class="nowrap">${esc(stateLabel(e))}${e.to ? ` → ${esc(e.to)}` : ""}${e.ack?.length ? " · подтвердил получение" : ""}</td>
       <td class="task opt" title="${esc(e.task)}">${esc(e.task)}</td></tr>`));
     $("#log-empty").classList.toggle("hidden", events.length > 0);
   } else if (tab === "agents") {
@@ -356,7 +353,20 @@ function taskList() {
   return [...byId.values()];
 }
 const canCoordinate = (t) => online && !!data?.device_id && (!t || t.coordinator_device_id === data.device_id);
-const deviceLabel = (id) => id === data?.device_id ? (data.link?.name || "этот компьютер") : (data?.link?.peers || []).find((p) => p.id === id)?.name || id || "устройство не указано";
+const deviceLabel = (id) => id === data?.device_id ? (data.link?.name || "этот компьютер") : (data?.link?.peers || []).find((p) => p.id === id)?.name || (id ? "другой компьютер" : "компьютер не указан");
+function sessionLabel(item) {
+  const a = item.assignment || item;
+  const session = a.session_id || a.session;
+  if (!session) return "сессия не привязана";
+  const known = Object.values(data?.agents || {}).find(agent => agent.project === item.project && agent.agent === a.agent && agent.device_id === a.device_id && (agent.session_id || agent.session) === session);
+  return known?.state === "working" && !isStale(known) ? `активна · ${a.agent || "агент"}` : `привязана · ${a.agent || "агент"}`;
+}
+function technicalDetails(item) {
+  const a = item.assignment || item;
+  const rows = [["task_id",item.task_id],["message_id",item.message_id],["project_id",item.project_id],["device_id",a.device_id],["session_id",a.session_id || a.session],["coordinator_device_id",item.coordinator_device_id],["assignment_epoch",a.epoch]];
+  return `<details class="technical-details"><summary>Технические данные</summary><dl class="kv">${rows.filter(([,v]) => v !== undefined && v !== null && v !== "").map(([k,v]) => `<dt>${esc(k)}</dt><dd><code>${esc(v)}</code></dd>`).join("")}</dl></details>`;
+}
+const roleLabel = role => ({ executor: "исполнитель", reviewer: "ревьюер", coordinator: "ведущий", lead: "ведущий", legacy: "прежнее назначение" }[role] || role || "роль не задана");
 const currentTask = (id) => taskList().find((t) => t.task_id === id);
 const taskEpoch = (t) => Number(t?.assignment?.epoch ?? t?.assignment_epoch ?? 0);
 const taskReceiptRows = (t) => (data?.todos || []).filter((r) => r.task_id === t.task_id);
@@ -368,7 +378,7 @@ function taskCardNumber(t) {
 function receiptsMarkup(t) {
   const rows = taskReceiptRows(t);
   if (!rows.length) return '<span class="sub">Сообщений и квитанций пока нет.</span>';
-  return rows.map((r) => `<li><code>${esc(r.display_id || `AD-${r.id}`)}</code> · <code>${esc(r.message_id || "")}</code>${r.to ? ` → ${esc(r.to)}` : ""} · ${[
+  return rows.map((r) => `<li><code>${esc(r.display_id || `AD-${r.id}`)}</code>${r.to ? ` → ${esc(r.to)}` : ""} · ${[
     ["delivered_at", "доставлено на доску"], ["forwarded_at", "переслано"], ["acked_at", "ACK: получено"], ["done_at", "напоминание закрыто"]
   ].filter(([k]) => r[k]).map(([k, title]) => `<span title="${esc(r[k])}">${title}</span>`).join(" · ") || "ожидает доставки"}</li>`).join("");
 }
@@ -386,19 +396,19 @@ function renderTasks() {
     const readonly = !online ? "Нет связи — только просмотр" : !coordinator ? "Назначение и передача — на компьютере ведущего" : "";
     return `<article class="task-card" data-key="task:${esc(t.task_id)}">
       <header><h2><code aria-label="Номер карточки">${esc(taskCardNumber(t))}</code> — ${esc(t.title || t.task || "Без названия")}</h2><b class="task-badge task-${esc(Object.hasOwn(TASK_LABEL, t.state) ? t.state : "unknown")}">${esc(TASK_LABEL[t.state] || t.state || "неизвестно")}</b></header>
-      <p class="sub">${esc(t.project)} · <code>${esc(t.task_id)}</code> · ${esc(ago(t.updated))}</p>
-      <dl class="task-meta"><dt>Исполнитель</dt><dd>${esc(a.agent || "не назначен")} · ${esc(a.role || "роль не задана")}</dd><dt>Устройство / сессия</dt><dd><code>${esc(a.device_id || "—")} / ${esc(a.session_id || "—")}</code> · назначение #${taskEpoch(t)}</dd></dl>
+      <p class="sub">${esc(t.project)} · ${esc(ago(t.updated))}</p>
+      <dl class="task-meta"><dt>Исполнитель</dt><dd>${esc(a.agent || "не назначен")} · ${esc(roleLabel(a.role))}</dd><dt>Компьютер</dt><dd>${esc(deviceLabel(a.device_id))}</dd><dt>Сессия</dt><dd>${esc(sessionLabel(t))}</dd></dl>
       ${t.conflict ? `<p class="peer-warn">Конфликт задания: ${esc(typeof t.conflict === "string" ? t.conflict : "нужна сверка ведущим")}</p>` : ""}
       <details><summary>Сообщения и квитанции (${taskReceiptRows(t).length})</summary><ul class="receipt-list">${receiptsMarkup(t)}</ul><p class="sub">ACK подтверждает только получение, а не выполнение или приёмку.</p></details>
       <div class="task-actions"><button data-task-action="details" data-task-id="${esc(t.task_id)}">Подробно…</button><button data-task-action="context" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Контекст / копировать…</button><button data-task-action="assign" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Назначить…</button><button data-task-action="transition" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Состояние…</button><button data-task-action="handoff" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Передать…</button></div>
       ${readonly ? `<p class="sub">${readonly}</p>` : ""}</article>`;
-  }).join("") : `<p class="empty">${supported ? "Задач пока нет. Назначьте первую задачу; её task_id останется тем же при смене сессии." : "Ожидается сервер с поддержкой задач."}</p>`);
+  }).join("") : `<p class="empty">${supported ? "Задач пока нет. Назначьте первую задачу; номер карточки сохранится при смене сессии." : "Ожидается сервер с поддержкой задач."}</p>`);
 }
 function taskDetails(t) {
   const cp = t.checkpoint || {};
   const kv = (k, v) => v === undefined || v === null || v === "" ? "" : `<dt>${esc(k)}</dt><dd>${esc(typeof v === "object" ? JSON.stringify(v, null, 2) : v)}</dd>`;
-  dialog("Задача — подробности", `<h2 class="task-title"><code>${esc(taskCardNumber(t))}</code> — ${esc(t.title || t.task)}</h2><dl class="kv">${kv("task_id", t.task_id)}${kv("project_id", t.project_id)}${kv("Состояние", TASK_LABEL[t.state] || t.state)}${kv("Ведущий (device_id)", t.coordinator_device_id)}${kv("Назначение", t.assignment)}${["repo", "branch", "commit", "report", "manifest", "next_step", "constraints", "skills"].map((k) => kv(k, cp[k])).join("")}</dl>
-    <h3>Артефакты</h3>${listValues(t.artifacts).length ? `<ul class="receipt-list">${listValues(t.artifacts).map((a) => `<li><code>${esc(a.path)}</code> · ${esc(a.status || "не проверен")}<br><code>${esc(a.hash || a.sha256 || "SHA не указан")}</code></li>`).join("")}</ul>` : "<p>Артефактов пока нет.</p>"}
+  dialog("Задача — подробности", `<h2 class="task-title"><code>${esc(taskCardNumber(t))}</code> — ${esc(t.title || t.task)}</h2><dl class="kv">${kv("Карточка", taskCardNumber(t))}${kv("Состояние", TASK_LABEL[t.state] || t.state)}${kv("Исполнитель", t.assignment?.agent)}${kv("Компьютер", deviceLabel(t.assignment?.device_id))}${kv("Сессия", sessionLabel(t))}${kv("Ведущий", deviceLabel(t.coordinator_device_id))}${["repo", "branch", "commit", "report", "manifest", "next_step", "constraints", "skills"].map((k) => kv(k, cp[k])).join("")}</dl>
+    ${technicalDetails(t)}<h3>Артефакты</h3>${listValues(t.artifacts).length ? `<ul class="receipt-list">${listValues(t.artifacts).map((a) => `<li><code>${esc(a.path)}</code> · ${esc(a.status || "не проверен")}<br><code>${esc(a.hash || a.sha256 || "SHA не указан")}</code></li>`).join("")}</ul>` : "<p>Артефактов пока нет.</p>"}
     <h3>История задачи</h3><ul class="receipt-list">${(t.history || []).slice(-12).reverse().map((h) => `<li>${esc(h.time || h.at || "")} · ${esc(TASK_LABEL[h.state] || h.action || h.state || "событие")}${h.note ? ` · ${esc(h.note)}` : ""}</li>`).join("") || "<li>Истории пока нет.</li>"}</ul><div class="buttons"><button data-close>Закрыть</button></div>`);
 }
 function checksMarkup(checks) {
@@ -407,7 +417,7 @@ function checksMarkup(checks) {
   return typeof checks === "string" ? checks : JSON.stringify(checks, null, 2);
 }
 function contextDialog(t, result, title = "Контекст задачи — локальные проверки") {
-  dialog(title, `<p>task_id: <code>${esc(t.task_id)}</code>. Проверки выполняются сервером только локально; копирование не запускает агента.</p><h3 id="context-checks-label">Результаты проверок (включая предупреждения)</h3><pre id="context-checks" class="context-checks" aria-labelledby="context-checks-label" tabindex="0">${esc(checksMarkup(result.checks))}</pre>
+  dialog(title, `<p>Карточка <code>${esc(taskCardNumber(t))}</code>. Проверки выполняются сервером только локально; копирование не запускает агента.</p><h3 id="context-checks-label">Результаты проверок (включая предупреждения)</h3><pre id="context-checks" class="context-checks" aria-labelledby="context-checks-label" tabindex="0">${esc(checksMarkup(result.checks))}</pre>
     <label for="task-context">Контекст для новой сессии</label><textarea id="task-context" readonly></textarea><p id="context-result" role="status"></p><div class="buttons"><button id="copy-context"${typeof result.text === "string" && result.text.trim() ? "" : " disabled"}>Копировать контекст</button><button data-close>Закрыть</button></div>`, (node) => {
     const ta = node.querySelector("#task-context"); ta.value = typeof result.text === "string" ? result.text : "";
     node.querySelector("#copy-context").onclick = async () => {
@@ -461,13 +471,16 @@ function assignmentFields(t) {
   const a = t?.assignment || {};
   const bindings = listValues(data.bindings).filter((b) => !t || b.project === t.project);
   const field = (key, label, value, required = true) => `<div class="field-row-stacked"><label for="assign-${key}">${label}</label><input id="assign-${key}" name="${key}" type="text" value="${esc(value)}"${required ? " required" : ""} autocomplete="off" spellcheck="false" maxlength="240"></div>`;
-  return `${bindings.length ? `<div class="field-row-stacked"><label for="assign-binding">Сохранённая привязка</label><select id="assign-binding"><option value="">Введите вручную</option>${bindings.map((b, i) => `<option value="${i}">${esc(`${b.agent} · ${b.device_id} / ${b.session_id} · ${b.role || "без роли"}`)}</option>`).join("")}</select></div>` : ""}<div class="assignment-grid">${field("agent", "Имя агента", a.agent)}${field("device_id", "Устройство (device_id)", a.device_id || data.device_id)}${field("session_id", "Новая / активная сессия (session_id)", a.session_id)}${field("role", "Роль (исполнитель / ревьюер / ведущий)", a.role || "executor")}${field("adapter", "Адаптер запуска (manual / runtime)", a.adapter || "manual", false)}</div>`;
+    const devices = new Map([[data.device_id, data.link?.name || "этот компьютер"], ...(data.link?.peers || []).map(p => [p.id, p.name || "другой компьютер"])]);
+  if (a.device_id && !devices.has(a.device_id)) devices.set(a.device_id, "ранее привязанный компьютер");
+  const deviceSelect = `<div class="field-row-stacked"><label for="assign-device_id">Компьютер</label><select id="assign-device_id" name="device_id">${[...devices].map(([id,name]) => `<option value="${esc(id)}"${id === (a.device_id || data.device_id) ? " selected" : ""}>${esc(name)}</option>`).join("")}</select></div>`;
+  return `${bindings.length ? `<div class="field-row-stacked"><label for="assign-binding">Сохранённая привязка</label><select id="assign-binding"><option value="">Введите вручную</option>${bindings.map((b, i) => `<option value="${i}">${esc(`${b.agent} · ${deviceLabel(b.device_id)} · ${b.role || "без роли"} · привязка ${i + 1}`)}</option>`).join("")}</select></div>` : ""}<div class="assignment-grid">${field("agent", "Имя агента", a.agent)}${deviceSelect}${field("session_id", "Привязка сессии агента", a.session_id)}${field("role", "Роль (исполнитель / ревьюер / ведущий)", a.role || "executor")}${field("adapter", "Адаптер запуска (manual / runtime)", a.adapter || "manual", false)}</div>`;
 }
 function taskMutationDialog(mode, t) {
   if (!online || (mode !== "transition" && !canCoordinate(t))) return;
   const creating = !t;
   const label = { assign: creating ? "Назначить новую задачу" : "Изменить назначение", handoff: "Передать задачу в новую сессию", transition: "Состояние задачи" }[mode];
-  const newFields = creating ? '<div class="field-row-stacked"><label for="task-project">Проект</label><input type="text" id="task-project" required maxlength="160"></div><div class="field-row-stacked"><label for="task-title">Название задачи</label><input type="text" id="task-title" required maxlength="500"></div>' : `<p>${esc(t.title || t.task)}<br><code>${esc(t.task_id)}</code> · назначение #${taskEpoch(t)}</p>`;
+  const newFields = creating ? '<div class="field-row-stacked"><label for="task-project">Проект</label><input type="text" id="task-project" required maxlength="160"></div><div class="field-row-stacked"><label for="task-title">Название задачи</label><input type="text" id="task-title" required maxlength="500"></div>' : `<p><code>${esc(taskCardNumber(t))}</code> · ${esc(t.title || t.task)}</p>`;
   const lifecycle = mode === "transition" ? `<div class="field-row-stacked"><label for="task-state">Новое состояние (отдельно от ACK)</label><select id="task-state">${Object.entries(TASK_LABEL).map(([k, v]) => `<option value="${k}"${k === t.state ? " selected" : ""}${k !== t.state && (!(TASK_NEXT[t.state] || []).includes(k) || (["accepted", "rework"].includes(k) && !canCoordinate(t))) ? " disabled" : ""}>${v}</option>`).join("")}</select></div><div class="field-row-stacked"><label for="task-note">Пояснение</label><input type="text" id="task-note" maxlength="1000"></div>` : assignmentFields(t);
   const checkpointFields = mode === "handoff" ? `<details><summary>Checkpoint: репозиторий, ветка, commit, отчёт</summary>${["repo", "branch", "commit", "report"].map((k) => `<div class="field-row-stacked"><label for="checkpoint-${k}">${esc(k)}</label><input type="text" id="checkpoint-${k}" value="${esc(t.checkpoint?.[k])}" autocomplete="off" spellcheck="false" maxlength="1024"></div>`).join("")}<p class="sub">Проверяются только явно разрешённые локальные пути. Список выбранных skills и артефакты сохраняются; содержимое файлов здесь не читается.</p></details>` : "";
   const handoff = mode === "handoff" ? '<p>Сохраняется текущий checkpoint и артефакты. После передачи получите контекст с результатами локальных проверок. Не вставляйте секреты или команды.</p><div class="field-row-stacked"><label for="handoff-next">Следующий шаг</label><textarea id="handoff-next" class="short-text" maxlength="4000"></textarea></div><div class="field-row-stacked"><label for="handoff-constraints">Ограничения / запреты (по одному на строку)</label><textarea id="handoff-constraints" class="short-text" maxlength="4000"></textarea></div>' : "";
@@ -541,6 +554,8 @@ function relativeMailPath(path) {
 }
 function renderMail() {
   const mail = data.mail;
+  $("#file-toggle").disabled = !online || !isLocal || AD_HOST.kind === "mobile";
+  $("#file-toggle").textContent = mail?.enabled ? "Выключить" : "Включить";
   $("#mail-roots").disabled = !online || !isLocal || AD_HOST.kind === "mobile" || !mail;
   $("#mail-refresh").disabled = !online || !mail;
   $("#mail-sync").textContent = syncDescription();
@@ -984,7 +999,12 @@ function peersLive(canPair) {
 const ACTIONS = {
   "task-new"() { taskMutationDialog("assign", null); },
   "task-context-roots"() { contextRootsDialog(); },
+  "file-tools"() { tab = "mail"; render(); },
   "mail-roots"() { mailRootsDialog(); },
+  async "file-toggle"() {
+    try { await api("/api/mail/config", { enabled: !data.mail?.enabled }); await poll(); renderMail(); }
+    catch (error) { alertBox("Файлы проектов", error.message); }
+  },
   async "mail-refresh"(e) {
     const btn = e?.target?.closest("button");
     if (btn) btn.disabled = true;
@@ -1230,12 +1250,12 @@ const ACTIONS = {
     const isTodo = selected.type === "todo";
     const head = isTodo
       ? `${kv("Задача", item.task)}${kv("Кому переслать", item.to)}${kv("Заметка", item.note)}${kv("Результат", item.result)}
-         ${kv("task_id", item.task_id)}${kv("message_id", item.kind === "forward" && item.message_id)}${kv("Доставлено на доску", when(item.delivered_at))}${kv("Переслано", when(item.forwarded_at))}${kv("ACK — только получено", when(item.acked_at))}
+         ${kv("Карточка", item.display_id || `AD-${item.id}`)}${kv("Доставлено", when(item.delivered_at))}${kv("Переслано", when(item.forwarded_at))}${kv("Получено агентом", when(item.acked_at))}
          ${kv("Пришло с компьютера", item.from_device?.name)}${kv("Отправлено на", item.sent_to && `«${item.sent_to.name}», ${when(item.sent_to.at)}${item.sent_to.auto ? " (само)" : ""}`)}${kv("Не отправилось", !item.done_at && item.send_error)}`
       : `${kv("Состояние", stateLabel(item))}${kv("Этап", item.phase)}${kv("Задача", item.task)}${kv("Кому переслать", item.to)}
-         ${kv("Заметка", item.note)}${kv("Результат", item.result)}${kv("Устройство", deviceLabel(item.device_id))}${kv("Сессия", item.session_id || item.session)}${kv("Обновлено", when(item.updated))}`;
-    const msg = isTodo && item.message ? `<p>Текст для пересылки:</p><textarea readonly class="msg-text"></textarea>` : "";
-    dialog(`${item.agent} — ${item.project}`, `<dl class="kv">${head}</dl>${msg}
+         ${kv("Заметка", item.note)}${kv("Результат", item.result)}${kv("Устройство", deviceLabel(item.device_id))}${kv("Сессия", sessionLabel(item))}${kv("Обновлено", when(item.updated))}`;
+    const msg = isTodo && item.message ? `<details><summary>Текст для передачи агенту</summary><textarea readonly class="msg-text"></textarea></details>` : "";
+    dialog(`${isTodo ? `${item.display_id || `AD-${item.id}`} — ` : ""}${item.agent} — ${item.project}`, `<dl class="kv">${head}</dl>${technicalDetails(item)}${msg}
       <div class="sunken-panel" style="max-height:160px"><table><thead><tr><th>Время</th><th>Событие</th><th>Задача</th></tr></thead><tbody>
       ${history.map((e) => `<tr><td class="nowrap">${hhmm(e.time)}</td><td class="nowrap">${esc(stateLabel(e))}${e.to ? ` → ${esc(e.to)}` : ""}</td><td>${esc(e.task)}</td></tr>`).join("")}
       </tbody></table></div>

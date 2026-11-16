@@ -12,7 +12,7 @@ const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const { SyncJournal, stableId, UUID } = require("./sync.js");
 
-const VERSION = "2.3.0"; // the app version, the same as in package.json (a test checks it)
+const VERSION = "2.3.1"; // the app version, the same as in package.json (a test checks it)
 const PROTOCOL = 3;
 const STATES = new Set(["working", "waiting", "done", "blocked", "idle"]);
 const WAITING_FOR = new Set([
@@ -353,10 +353,11 @@ class Desk extends EventEmitter {
     this.config = {
       port: 8098, lan: true, notify: true, popup_sound: true, popup_volume: 80, stale_minutes: 90, autostart: true,
       retention_days: 0, watch: [{ path: path.join(this.dataDir, "markers"), project: "" }],
-      agents: {}, aliases: {}, allowed_hosts: [],
+      agents: {}, aliases: {}, allowed_hosts: [], file_sync_enabled: false,
       ...cfg,
     };
     const c = this.config;
+    c.file_sync_enabled = c.file_sync_enabled === true;
     if (!isStrongKey(c.key)) c.key = newKey(); // old 48-bit Agent Board keys are replaced
     if (!isStrongKey(c.agent_key)) c.agent_key = newKey(); // separate loopback-only agent API credential
     c.watch = (Array.isArray(c.watch) ? c.watch : [])
@@ -867,7 +868,7 @@ class Desk extends EventEmitter {
   _tick() {
     try {
       this.scanOnce();
-      if (this.mail?.scan()) this._saveState();
+      if (this.fileSyncEnabled && this.mail?.scan()) this._saveState();
       this._cleanup();
     } catch (e) {
       this.log("scan failed:", e.stack || e.message);
@@ -875,6 +876,22 @@ class Desk extends EventEmitter {
   }
 
   // --- API payloads ---
+
+  // Card/task events always synchronize. File replication is a separate, explicit owner choice.
+  get fileSyncEnabled() {
+    return this.config.file_sync_enabled === true
+      && !(Array.isArray(this.config.mail_roots) && this.config.mail_roots.length === 0);
+  }
+
+  mailPayload() {
+    if (!this.fileSyncEnabled) return { enabled: false, mode: "disabled", roots: [], files: [], errors: [] };
+    return { ...this.mail.payload(), enabled: true };
+  }
+
+  mailDiagnostics() {
+    if (!this.fileSyncEnabled) return { enabled: false, mode: "disabled", projects: [], files: 0, errors: [] };
+    return { ...this.mail.diagnostics(), enabled: true };
+  }
 
   payload() {
     const s = this.state;
@@ -886,7 +903,7 @@ class Desk extends EventEmitter {
       agents: { ...s.agents, ...Object.fromEntries(Object.entries(s.remote_agents || {}).map(([k, a]) => [`remote:${k}`, a])) },
       device_id: c.device_id,
       tasks: this.tasks.list().map(t => ({ ...t, card_id: s.task_card_ids[t.task_id] })), bindings: Object.values(s.bindings || {}),
-      mail: this.mail.payload(),
+      mail: this.mailPayload(),
       todos: s.todos.map((t) => ({ ...t, forward_text: forwardText(t) })),
       events: s.events.slice(-LIMITS.payloadEvents).map(({ message, ...e }) => e),
       rejected: s.rejected.slice(-20),
@@ -897,7 +914,7 @@ class Desk extends EventEmitter {
       config: {
         stale_minutes: c.stale_minutes, notify: c.notify, watch: c.watch, lan: c.lan, popup_sound: c.popup_sound,
         popup_volume: c.popup_volume, autostart: c.autostart, retention_days: c.retention_days, agents: c.agents, aliases: c.aliases,
-        task_repo_roots: c.task_repo_roots || [], task_skill_roots: c.task_skill_roots || [],
+        task_repo_roots: c.task_repo_roots || [], task_skill_roots: c.task_skill_roots || [], file_sync_enabled: this.fileSyncEnabled,
       },
       server_time: nowIso(),
       host: os.hostname(),
@@ -1054,7 +1071,7 @@ class Desk extends EventEmitter {
         return a ? this._send(res, 200, a, cors) : this._send(res, 404, { error: "not found" }, cors);
       }
       if (url.pathname === "/api/alerts") return this._waitAlerts(res, url, cors);
-      if (url.pathname === "/api/mail") return this._send(res, 200, this.mail.payload(), cors);
+      if (url.pathname === "/api/mail") return this._send(res, 200, this.mailPayload(), cors);
       if (url.pathname === "/api/tasks/context") {
         try { return this._send(res, 200, this.tasks.context(url.searchParams.get("id")), cors); }
         catch (e) { return this._send(res, e.status || 400, { error: e.message }, cors); }
@@ -1204,19 +1221,27 @@ class Desk extends EventEmitter {
       catch (e) { return { code: e.status || 400, body: { error: e.message } }; }
     }
     if (pathname === "/api/mail/config") {
-      if (!auth.local) return { code: 403, body: { error: "папки почты меняются только на ПК" } };
+      if (!auth.local) return { code: 403, body: { error: "синхронизация файлов настраивается только на ПК" } };
+      if (Object.hasOwn(body, "enabled") && typeof body.enabled !== "boolean") return { code: 400, body: { error: "enabled должен быть true или false" } };
       if (body.automatic === true) {
         delete this.config.mail_roots;
-        this._saveConfig(); this.mail.scan(); this._saveState(); this.emit("change");
-        return { body: this.mail.payload() };
-      }
-      if (!Array.isArray(body.roots) || body.roots.length > 20) return { code: 400, body: { error: "roots должен быть списком до 20 папок" } };
-      for (const r of body.roots) {
-        if (!r || !r.project || !path.isAbsolute(r.path || "") || !fs.existsSync(r.path) || !fs.lstatSync(r.path).isDirectory() || fs.lstatSync(r.path).isSymbolicLink()) return { code: 400, body: { error: "нужны проект и существующая обычная папка" } };
-      }
-      this.config.mail_roots = body.roots.map(r => ({ project: oneLine(r.project,60), path: r.path }));
-      this._saveConfig(); this.mail.scan(); this._saveState(); this.emit("change");
-      return { body: this.mail.payload() };
+        this.config.file_sync_enabled = body.enabled !== false;
+      } else if (Object.hasOwn(body, "roots")) {
+        if (!Array.isArray(body.roots) || body.roots.length > 20) return { code: 400, body: { error: "roots должен быть списком до 20 папок" } };
+        for (const r of body.roots) {
+          if (!r || !r.project || !path.isAbsolute(r.path || "") || !fs.existsSync(r.path) || !fs.lstatSync(r.path).isDirectory() || fs.lstatSync(r.path).isSymbolicLink()) return { code: 400, body: { error: "нужны проект и существующая обычная папка" } };
+        }
+        this.config.mail_roots = body.roots.map(r => ({ project: oneLine(r.project,60), path: r.path }));
+        this.config.file_sync_enabled = body.roots.length > 0 && body.enabled !== false;
+      } else if (typeof body.enabled === "boolean") {
+        // Toggling never deletes roots, files, incoming roots or the saved conflict/hash index.
+        this.config.file_sync_enabled = body.enabled
+          && !(Array.isArray(this.config.mail_roots) && this.config.mail_roots.length === 0);
+      } else return { code: 400, body: { error: "нужны enabled, automatic:true или roots" } };
+      this._saveConfig();
+      if (this.fileSyncEnabled) this.mail.scan();
+      this._saveState(); this.emit("change");
+      return { body: this.mailPayload() };
     }
     const s = this.state;
     const parts = pathname.split("/").filter(Boolean);

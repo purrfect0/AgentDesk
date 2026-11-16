@@ -3,10 +3,10 @@ const test = require("node:test"), assert = require("node:assert/strict"), fs = 
 const { Desk, parseMarker } = require("../desk.js");
 const { seal } = require("../sync.js");
 function temp() { return fs.mkdtempSync(path.join(os.tmpdir(), "agentdesk-linked-test-")); }
-async function fixture() {
+async function fixture(fileSyncEnabled = false) {
   const root = temp(), mail = path.join(root, "mail"); fs.mkdirSync(mail);
   const d = new Desk({ dataDir: path.join(root,"data"), legacyDir:null, port:0, lan:false, discovery:false, log() {} });
-  d.config.watch = []; d.config.mail_roots = [{project:"P",path:mail}];
+  d.config.watch = []; d.config.mail_roots = [{project:"P",path:mail}]; d.config.file_sync_enabled = fileSyncEnabled;
   await d.start(); d.peers.stop(); return { d,root,mail };
 }
 function pair(a,b) {
@@ -67,7 +67,7 @@ test("unknown/tampered encrypted peer is rejected and keys are absent from paylo
   }finally{await clean(a,b);}
 });
 test("project mail content is copied between independent roots and survives repeat sync",async()=>{
-  const a=await fixture(),b=await fixture();try{
+  const a=await fixture(true),b=await fixture(true);try{
     pair(a.d,b.d);const bytes=crypto.randomBytes(150000);fs.writeFileSync(path.join(a.mail,"synthetic-report.bin"),bytes);
     await b.d.peers.sync(a.d.config.device_id);
     assert.deepEqual(fs.readFileSync(path.join(b.mail,"synthetic-report.bin")),bytes);

@@ -459,19 +459,19 @@ class PeerLink {
     const p = this.peer(peerId);
     if (!p) throw fail("компьютер не подключён");
     try {
-      this.desk.mail.scan(); this.desk._saveState();
+      if (this.desk.fileSyncEnabled) { this.desk.mail.scan(); this.desk._saveState(); }
       for (let batch = 0; batch < 5; batch++) {
         const j = this.desk.sync.journal;
         j.mail_cursors ??= {};
         const page = this.desk.sync.page(j.sent[p.id] || 0);
-        const r = await this.secure(p, { action: "events", cursor: j.cursors[p.id] || 0, journal: j.peer_journals[p.id], events: page.events, mail_cursor: j.mail_cursors[p.id] || 0 });
+        const r = await this.secure(p, { action: "events", cursor: j.cursors[p.id] || 0, journal: j.peer_journals[p.id], events: page.events, mail_cursor: this.desk.fileSyncEnabled ? (j.mail_cursors[p.id] || 0) : 0 });
         if (!Array.isArray(r.receipts) || page.events.some(ev => !r.receipts.includes(ev.id))) throw fail("нет долговечной квитанции по всем событиям");
         this.desk.sync.receive(r.events || []);
         const current = this.desk.sync.journal;
         const reset = current.peer_journals[p.id] && current.peer_journals[p.id] !== r.journal;
         current.sent[p.id] = reset ? 0 : page.cursor; current.cursors[p.id] = r.cursor;
         current.peer_journals[p.id] = r.journal;
-        current.mail_cursors ??= {}; current.mail_cursors[p.id] = r.mail_cursor || 0;
+        current.mail_cursors ??= {}; current.mail_cursors[p.id] = this.desk.fileSyncEnabled ? (r.mail_cursor || 0) : 0;
         for (const ev of page.events) if (ev.type === "todo" && !ev.deleted) {
           const t = this.desk.state.todos.find(t => t.message_id === ev.entity_id);
           if (t && !t.delivered_at) t.delivered_at = nowIso();
@@ -480,12 +480,12 @@ class PeerLink {
         const old = this.status.get(p.id) || {};
         this.status.set(p.id, { ...old, online: true, agents: cleanAgents(r.agents), error: "", checked: nowIso(), synced: nowIso(), protocol: 3, mail: r.mail_status || null });
         await this.syncMail(p, r.mail || []);
-        if (!reset && !page.more && !r.more && !r.mail_more) break;
+        if (!reset && !page.more && !r.more && (!this.desk.fileSyncEnabled || !r.mail_more)) break;
       }
       delete this.desk.sync.journal.errors[p.id]; this._changed();
       return { ok: true, synced: this.status.get(p.id)?.synced };
     } catch (e) {
-      const text = e.status === 404 ? "для общей почты обновите AgentDesk на этом компьютере до 2.3.0" : e.message;
+      const text = e.status === 404 ? "для синхронизации карточек обновите AgentDesk на этом компьютере до 2.3.0" : e.message;
       this.desk.sync.journal.errors[p.id] = text;
       const old = this.status.get(p.id) || {};
       this.status.set(p.id, { ...old, error: text, checked: nowIso(), online: e.status ? true : false });
@@ -494,11 +494,13 @@ class PeerLink {
   }
 
   async syncMail(p, manifest) {
+    if (!this.desk.fileSyncEnabled) return;
     if (!Array.isArray(manifest) || manifest.length > 100) throw fail("неверный список почты");
     const local = this.desk.mail.manifest();
     this.desk.sync.journal.mail_received ??= {};
     const roots = this.desk.mail.payload().roots || [];
     for (const item of manifest) {
+      if (!this.desk.fileSyncEnabled) return;
       if (!roots.some(root => root.project === item.project)) {
         const incoming = this.desk.mail.ensureIncomingRoot(item.project, item);
         if (!incoming) continue;
@@ -509,7 +511,9 @@ class PeerLink {
       if (this.desk.sync.journal.mail_received[receivedKey] === item.sha256 && local.some(f => f.project === item.project && f.sha256 === item.sha256)) continue;
       let offset = 0;
       while (offset < item.size || offset === 0) {
+        if (!this.desk.fileSyncEnabled) return;
         const r = await this.secure(p, { action: "mail-chunk", file: { project: item.project, path: item.path, sha256: item.sha256, offset } });
+        if (!this.desk.fileSyncEnabled) return;
         const chunk = r.chunk;
         if (!chunk || chunk.offset !== offset || chunk.sha256 !== item.sha256 || chunk.total !== item.size) throw fail("неверный фрагмент почты");
         await this.desk.mail.acceptChunk(p, { ...item, ...chunk, previous_hash: item.previous_hash });
@@ -528,12 +532,11 @@ class PeerLink {
     const value = unseal(body.packet, p.my_key);
     let result;
     if (value.action === "info") {
-      result = { id: this.config.device_id, name: this.name, agents: this.desk.agentDirectory(), protocol: 3, mail_status: this.desk.mail.diagnostics() };
+      result = { id: this.config.device_id, name: this.name, agents: this.desk.agentDirectory(), protocol: 3, mail_status: this.desk.mailDiagnostics() };
     } else if (value.action === "events") {
       const receipts = this.desk.sync.receive(value.events || []);
       const page = this.desk.sync.page(value.journal === this.desk.sync.journal.id ? (value.cursor || 0) : 0);
-      this.desk.mail.scan();
-      const all = this.desk.mail.manifest();
+      const all = this.desk.fileSyncEnabled ? this.desk.mail.manifest() : [];
       const start = Number.isSafeInteger(value.mail_cursor) && value.mail_cursor >= 0 && value.mail_cursor < all.length ? value.mail_cursor : 0;
       const mail = []; let mailBytes = 0;
       for (const item of all.slice(start, start + 100)) {
@@ -543,9 +546,10 @@ class PeerLink {
       }
       const next = start + mail.length;
       result = { ...page, journal: this.desk.sync.journal.id, receipts, mail, mail_cursor: next < all.length ? next : 0, mail_more: next < all.length,
-        id: this.config.device_id, name: this.name, agents: this.desk.agentDirectory(), mail_status: this.desk.mail.diagnostics() };
+        id: this.config.device_id, name: this.name, agents: this.desk.agentDirectory(), mail_status: this.desk.mailDiagnostics() };
       this.desk._saveState();
     } else if (value.action === "mail-chunk") {
+      if (!this.desk.fileSyncEnabled) throw Object.assign(fail("синхронизация файлов отключена"), { status: 403 });
       result = { chunk: this.desk.mail.readChunk(value.file || {}) };
     } else throw Object.assign(fail("неизвестное действие синхронизации"), { status: 400 });
     return { body: { packet: seal(result, p.key) } };

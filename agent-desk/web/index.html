@@ -27,7 +27,7 @@
       <span class="menu-label"><u>Ф</u>айл</span>
       <div class="menu-list">
         <div class="menu-item" data-action="folders"><img src="icons/directory_closed-1.png" alt="">Папки с маркерами…</div>
-        <div class="menu-item" data-action="mail-roots"><img src="icons/envelope_closed-1.png" alt="">Папки общей почты…</div>
+        <div class="menu-item" data-action="file-tools"><img src="icons/directory_closed-1.png" alt="">Файлы проектов (дополнительно)…</div>
         <div class="menu-item" data-action="pair"><img src="icons/world-1.png" alt="">Подключить телефон…</div>
         <div class="menu-item" data-action="peers"><img src="icons/network_normal_two_pcs-1.png" alt="">Другие компьютеры…</div>
         <div class="menu-item mobile-only" data-action="connect"><img src="icons/world-1.png" alt="">Подключение к ПК…</div>
@@ -86,7 +86,7 @@
           <thead><tr><th class="c-ico"></th><th>Что сделать</th><th>Статус</th><th class="opt">Когда</th></tr></thead>
           <tbody></tbody>
         </table>
-        <div class="empty" id="todo-empty"><img src="icons/check-0.png" alt="">Всё переслано, никто не ждёт ответа.</div>
+        <div class="empty" id="todo-empty"><img src="icons/check-0.png" alt="">Нет действий для владельца.</div>
       </div>
     </fieldset>
     <div class="splitter" id="splitter" title="Потяните, чтобы изменить высоту (двойной щелчок — сброс)"></div>
@@ -110,12 +110,12 @@
           <div class="empty hidden" id="log-empty">В этом проекте пока нет событий.</div>
         </div>
         <section class="linked-view hidden" id="tasks-view" role="tabpanel" aria-labelledby="tab-tasks">
-          <div class="linked-heading"><p>Одна карточка на task_id. Получение сообщения не означает приёмку задачи.</p><button data-action="task-context-roots" id="task-context-roots" class="hidden">Папки контекста…</button><button data-action="task-new" id="task-new">Назначить задачу…</button></div>
+          <div class="linked-heading"><p>Одна задача — одна карточка. Получение сообщения не означает приёмку задачи.</p><button data-action="task-context-roots" id="task-context-roots" class="hidden">Папки контекста…</button><button data-action="task-new" id="task-new">Назначить задачу…</button></div>
           <p class="peer-warn hidden" id="tasks-unavailable" role="status">Эта версия сервера ещё не поддерживает карточки задач.</p>
           <div class="sunken-panel linked-panel" id="task-list"></div>
         </section>
-        <section class="linked-view hidden" id="mail-view" role="tabpanel" aria-labelledby="tab-mail">
-          <div class="linked-heading"><p>Общие файлы проекта, не электронная почта. Секреты и системные файлы не передаются.</p><button data-action="mail-roots" id="mail-roots">Папки…</button><button data-action="mail-refresh" id="mail-refresh">Проверить</button></div>
+        <section class="linked-view hidden" id="mail-view" role="region" aria-label="Дополнительная синхронизация файлов">
+          <div class="linked-heading"><p>Дополнительная синхронизация файлов. Карточки и сообщения работают независимо от неё.</p><button data-action="file-toggle" id="file-toggle">Включить</button><button data-action="mail-roots" id="mail-roots">Папки…</button><button data-action="mail-refresh" id="mail-refresh">Проверить</button></div>
           <p id="mail-sync" role="status"></p>
           <div id="mail-peers" aria-label="Сверка по устройствам"></div>
           <div id="mail-errors" role="status"></div>
