@@ -162,9 +162,13 @@ b.to { font-weight: bold; }
 .vol-slider input { position: absolute; width: 150px; left: 50%; top: 50%; margin: 0; transform: translate(-50%, -50%) rotate(-90deg); }
 .vol-value { min-width: 36px; text-align: center; }
 .dialog:has(.vol-panel) { width: 320px; }
-.todo-panel { height: 128px; }
+.todo-panel { height: 168px; }
 .empty { display: flex; align-items: center; gap: 8px; padding: 10px; color: #444; }
 .empty img { width: 32px; height: 32px; }
+code { font-family: "Courier New", Consolas, monospace; font-size: 1em; }
+.card-id { display: inline-block; background: #efefef; border: 1px solid #808080; padding: 0 3px; font-weight: bold; color: #000; margin-right: 4px; }
+table.interactive > tbody > tr.highlighted .card-id { background: #fff; color: #000; border-color: #fff; }
+tr[data-todo]:focus-visible, tr[data-agent]:focus-visible { outline: 1px dotted #000; outline-offset: -2px; }
 
 #tabs { margin: 0; }
 .project-tabs { margin: 0; flex: none; }
@@ -185,11 +189,20 @@ tr.group td {
 /* Dialogs */
 .modal-layer { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; }
 .dialog { width: min(560px, calc(100vw - 16px)); max-height: calc(100vh - 16px); display: flex; flex-direction: column; }
-.dialog > .window-body { overflow: auto; }
+.dialog.dialog-wide { width: min(740px, calc(100vw - 16px)); }
+.dialog > .window-body { overflow: auto; line-height: 1.35; }
+.dialog h2, .dialog h3, .dialog h4 { font-size: inherit; line-height: 1.35; }
+.dialog h2.task-title { font-size: 12px; font-weight: bold; margin: 0 0 8px; }
+.dialog h3 { font-weight: bold; margin: 10px 0 4px; padding-top: 6px; border-top: 1px solid #808080; box-shadow: inset 0 1px #fff; }
 .dialog .msg { display: flex; gap: 12px; align-items: flex-start; }
 .dialog .msg > img { width: 32px; height: 32px; flex: none; }
 .dialog .buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
 .dialog .buttons.wrap { flex-wrap: wrap; }
+.msg-body { margin: 4px 0 6px; padding: 8px; min-height: 96px; max-height: 40vh; overflow: auto; white-space: pre-wrap; word-break: break-word; background: #fff; color: #000; box-shadow: inset -1px -1px #fff, inset 1px 1px grey, inset -2px -2px #dfdfdf, inset 2px 2px #0a0a0a; font-family: "Courier New", Consolas, monospace; font-size: 12px; line-height: 1.45; user-select: text; }
+.technical-details { margin: 8px 0; color: #444; }
+.technical-details summary { cursor: pointer; }
+.dialog ul.kv-list { margin: 0; padding-left: 16px; }
+.dialog ul.kv-list li { margin: 2px 0; }
 .checklist { margin: 8px 0; padding-left: 18px; }
 .checklist li { margin: 4px 0; }
 .checklist .ok { color: #008000; }
@@ -204,9 +217,9 @@ tr.group td {
 .dialog textarea { width: 100%; box-sizing: border-box; height: 230px; font-family: "Courier New", monospace; font-size: 12px; }
 .dialog input[type=text] { width: 100%; box-sizing: border-box; }
 .dialog .field-row-stacked { margin-bottom: 8px; }
-.dialog .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; margin: 8px 0; }
-.dialog .kv dt { color: #444; }
-.dialog .kv dd { margin: 0; word-break: break-word; }
+.dialog .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0; line-height: 1.35; }
+.dialog .kv dt { color: #333; font-weight: bold; }
+.dialog .kv dd { margin: 0; word-break: break-word; min-width: 0; }
 .dialog .select-all { user-select: all; word-break: break-all; background: #fff; padding: 4px; box-shadow: inset -1px -1px #fff, inset 1px 1px grey, inset -2px -2px #dfdfdf, inset 2px 2px #0a0a0a; }
 /* «Другие компьютеры»: PC <-> laptop of one Wi-Fi (core/peers.js) */
 .dialog .ok { color: #008000; }
@@ -256,8 +269,12 @@ table.interactive > tbody > tr.highlighted td .peer-note .bad { color: #ffd0d0; 
 .task-accepted { color: var(--ad-success); }
 .task-blocked, .task-rework { color: var(--ad-warning); }
 .task-meta { display: grid; grid-template-columns: max-content 1fr; gap: 3px var(--ad-gap); margin: var(--ad-gap) 0; }
-.task-meta dt { color: var(--ad-muted); }
+.task-meta dt { color: var(--ad-muted); font-weight: bold; }
 .task-meta dd { margin: 0; min-width: 0; }
+.tasks-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.tasks-toolbar select { width: auto; }
+.tasks-toolbar input[type=search] { flex: 1; min-width: 160px; }
+.tasks-more { margin: var(--ad-gap); }
 .task-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--ad-gap); }
 .task-card details { color: var(--ad-muted); }
 .task-card summary { cursor: pointer; }
@@ -268,8 +285,10 @@ table.interactive > tbody > tr.highlighted td .peer-note .bad { color: #ffd0d0; 
 .assignment-grid label { display: block; }
 .dialog select { width: 100%; }
 .dialog textarea.short-text { height: 60px; }
-.context-checks { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 140px; overflow: auto; background: var(--ad-paper); color: var(--ad-ink); border: 1px solid var(--ad-border); padding: 6px; }
-#task-context { margin-top: 4px; }
+.context-checks-summary { margin: 6px 0; padding: 6px 8px; background: var(--ad-paper); border: 1px solid var(--ad-border); line-height: 1.4; }
+.context-checks-summary ul { margin: 4px 0 0; padding-left: 18px; }
+.context-checks { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; background: var(--ad-paper); color: var(--ad-ink); border: 1px solid var(--ad-border); padding: 6px; }
+#task-context { margin-top: 4px; min-height: 180px; }
 .mail-project h2 { background: silver; padding: 4px 6px; border-bottom: 1px solid var(--ad-border); }
 .mail-project h2 small { color: var(--ad-muted); font-size: inherit; font-weight: normal; }
 .mail-table { table-layout: fixed; }
@@ -285,6 +304,9 @@ body.mobile [data-action="mail-roots"] { display: none !important; }
 @media (max-width: 520px) {
   .assignment-grid { grid-template-columns: 1fr; }
   .task-meta { grid-template-columns: 1fr; }
+  .task-meta dd { margin-bottom: 4px; }
+  .dialog .kv { grid-template-columns: 1fr; }
+  .dialog .kv dd { margin-bottom: 4px; }
   .task-actions button { flex: 1 1 120px; }
   .dialog .buttons { flex-wrap: wrap; }
   .mail-table th:last-child { width: 45px; }

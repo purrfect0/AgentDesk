@@ -109,8 +109,12 @@ if (process.argv.includes("--serve")) {
   });
   test("delivered messages wait quietly and closed cards never request agent launch", () => {
     const h = harness();
-    assert.equal(h.run('needsAction({kind:"forward",delivered_at:"2026-11-16"})'), false);
-    assert.doesNotMatch(h.run('todoStatus({kind:"forward",delivered_at:"2026-11-16"})'), /нужен|запуск/i);
+    assert.equal(h.run('needsAction({kind:"forward",delivered_at:"2026-11-16",delivery_target:"fixture-laptop"})'), false);
+    assert.equal(h.run('needsAction({kind:"forward",delivered_at:"2026-11-16",forwarded_at:"2026-11-16"})'), false);
+    assert.equal(h.run('needsAction({kind:"forward",delivered_at:"2026-11-16",acked_at:"2026-11-16"})'), false);
+    assert.equal(h.run('needsAction({kind:"forward",delivered_at:"2026-11-16",done_at:"2026-11-16"})'), false);
+    assert.equal(h.run('needsAction({kind:"forward",delivered_at:"2026-11-16"})'), true);
+    assert.doesNotMatch(h.run('todoStatus({kind:"forward",delivered_at:"2026-11-16",delivery_target:"fixture-laptop"})'), /нужен|запуск/i);
     assert.equal(h.run('todoStatus({kind:"forward",done_at:"2026-11-16",delivered_at:"2026-11-16"})'), "закрыто");
   });
   test("primary task views show card number and friendly device/session, with UUIDs only in technical disclosure", () => {
@@ -128,6 +132,31 @@ if (process.argv.includes("--serve")) {
     assert.match(html,/AD-7/); assert.match(html,/Технические данные/);
     assert.doesNotMatch(html.split('<details class="technical-details">')[0], /33333333-3333-4333|11111111-1111-4111/);
   });
+  test("hex from_device name is resolved to peer label and self-echo is hidden", () => {
+    const state = fixture();
+    state.todos[0].from_device = { id: "fixture-laptop", name: "fixture-laptop" };
+    const h = harness(state);
+    assert.equal(h.run('fromDeviceLabel(data.todos[0])'), "Ноутбук (тест)");
+    assert.match(h.run('peerNote(data.todos[0])'), /Ноутбук \(тест\)/);
+    assert.doesNotMatch(h.run('peerNote(data.todos[0])'), /fixture-laptop/);
+    state.todos[0].from_device = { id: "fixture-pc", name: "fixture-pc" };
+    assert.equal(h.run('fromDeviceLabel(data.todos[0])'), "");
+    assert.equal(h.run('peerNote(data.todos[0])'), "");
+  });
+  test("task filter and search narrow the rendered cards", () => {
+    const state = fixture();
+    const second = { ...state.tasks[0], task_id: "55555555-5555-4555-8555-555555555555", title: "Другая задача", state: "accepted", card_id: "AT-99" };
+    state.tasks.push(second);
+    const h = harness(state);
+    h.run('taskFilter = "accepted"; renderTasks()');
+    assert.match(h.root.querySelector("#task-list").innerHTML, /AT-99/);
+    assert.doesNotMatch(h.root.querySelector("#task-list").innerHTML, /AD-7/);
+    h.run('taskFilter = "all"; taskSearch = "другая"; renderTasks()');
+    assert.match(h.root.querySelector("#task-list").innerHTML, /Другая задача/);
+    assert.doesNotMatch(h.root.querySelector("#task-list").innerHTML, /Проверить передачу/);
+    h.run('taskSearch = "нет-такого"; renderTasks()');
+    assert.match(h.root.querySelector("#task-list").innerHTML, /Ничего не найдено/);
+  });
   test("file mailbox is an optional menu, not a primary work tab", () => {
     const h=harness();h.run("render()");assert.doesNotMatch(h.root.querySelector("#tabs").innerHTML,/Общая почта|tab-mail/);
     assert.match(fs.readFileSync(path.join(__dirname,"index.html"),"utf8"),/data-action="file-tools"/);
@@ -137,9 +166,11 @@ if (process.argv.includes("--serve")) {
     const h = harness(state); h.run("renderTasks()"); const html = h.root.querySelector("#task-list").innerHTML;
     assert.equal((html.match(/<article/g) || []).length, 1); assert.match(html, /сдана на проверку/); assert.match(html, /&lt;img/); assert.match(h.run("technicalDetails(data.todos[0])"), /&lt;script/); assert.doesNotMatch(html, /<script>/); assert.equal(h.run("data.todos.filter(needsAction).length"), 0);
     assert.equal(h.run('needsAction({ kind: "receipt" })'), false); assert.equal(h.run('needsAction({ kind: "reply" })'), true);
-    assert.equal(h.run('needsAction({ kind: "forward", delivered_at: "2026-11-16" })'), false);
+    assert.equal(h.run('needsAction({ kind: "forward", delivered_at: "2026-11-16" })'), true);
     assert.equal(h.run('needsAction({ kind: "forward", delivery_target: "fixture-laptop" })'), false);
-    assert.equal(h.run('needsAction({ kind: "forward", delivery_target: "fixture-pc", delivered_at: "2026-11-16" })'), false);
+    assert.equal(h.run('needsAction({ kind: "forward", delivery_target: "fixture-laptop", delivered_at: "2026-11-16" })'), false);
+    assert.equal(h.run('needsAction({ kind: "forward", delivery_target: "fixture-pc", delivered_at: "2026-11-16" })'), true);
+    assert.equal(h.run('needsAction({ kind: "forward", delivery_target: "fixture-pc", delivered_at: "2026-11-16", forwarded_at: "2026-11-16" })'), false);
   });
   test("replicated agents keep actual map keys and show device identity without cross-device selection collision", () => {
     const state = fixture(); const time = new Date().toISOString();

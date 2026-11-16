@@ -90,3 +90,53 @@ test("retired task assignment cannot overwrite a handoff even with a larger cloc
   retired.id=crypto.randomUUID();retired.clock=1000;b.sync.receive([retired]);
   assert.equal(b.state.tasks[id].assignment.session_id,"new");assert.equal(b.state.tasks[id].assignment.epoch,2);
 });
+
+test("imported todo resolves peer name and never leaks hex device_id or self-echo", () => {
+  const a = desk("aaaaaaaaaaaaaaaa"), b = desk("bbbbbbbbbbbbbbbb");
+  b.config.peers = [{ id: a.config.device_id, name: "Synthetic A" }];
+  todo(a);
+  b.sync.receive(a.sync.page().events);
+  const got = b.state.todos[0];
+  assert.equal(got.from_device.id, a.config.device_id);
+  assert.equal(got.from_device.name, "Synthetic A");
+  assert.notEqual(got.from_device.name, a.config.device_id);
+  const echoed = structuredClone(a.sync.journal.events.at(-1));
+  const c = desk("cccccccccccccccc");
+  echoed.origin = c.config.device_id; echoed.clock = 1000; echoed.id = crypto.randomUUID();
+  c.sync.receive([echoed]);
+  assert.equal(c.state.todos[0].from_device, undefined);
+});
+
+test("receive does not remind for cards targeted at another desk or self-echo", () => {
+  const a = desk("aaaaaaaaaaaaaaaa"), b = desk("bbbbbbbbbbbbbbbb");
+  b.config.peers = [{ id: a.config.device_id, name: "Synthetic A" }];
+  const reminders = [];
+  b._remind = (t, opts) => reminders.push({ id: t.id, from: opts?.from });
+  todo(a);
+  const ev = a.sync.journal.events.at(-1);
+  const forOther = structuredClone(ev);
+  forOther.id = crypto.randomUUID(); forOther.clock = 1000;
+  forOther.data.delivery_target = "cccccccccccccccc";
+  b.sync.receive([forOther]);
+  assert.equal(reminders.length, 0);
+  const selfEcho = structuredClone(ev);
+  const c = desk("cccccccccccccccc");
+  selfEcho.id = crypto.randomUUID(); selfEcho.clock = 1001; selfEcho.origin = c.config.device_id;
+  selfEcho.data.origin_device_id = c.config.device_id;
+  selfEcho.data.delivery_target = c.config.device_id;
+  c.config.peers = [{ id: b.config.device_id, name: "Synthetic B" }];
+  const cReminders = [];
+  c._remind = (t, opts) => cReminders.push({ id: t.id, from: opts?.from });
+  c.sync.receive([selfEcho]);
+  assert.equal(cReminders.length, 0);
+  const d = desk("dddddddddddddddd");
+  d.config.peers = [{ id: a.config.device_id, name: "Synthetic A" }];
+  const dReminders = [];
+  d._remind = (t, opts) => dReminders.push({ id: t.id, from: opts?.from });
+  const forMe = structuredClone(ev);
+  forMe.id = crypto.randomUUID(); forMe.clock = 1002;
+  forMe.data.delivery_target = d.config.device_id;
+  d.sync.receive([forMe]);
+  assert.equal(dReminders.length, 1);
+  assert.equal(dReminders[0].from, "Synthetic A");
+});

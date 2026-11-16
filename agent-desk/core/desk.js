@@ -12,7 +12,7 @@ const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const { SyncJournal, stableId, UUID } = require("./sync.js");
 
-const VERSION = "2.3.1"; // the app version, the same as in package.json (a test checks it)
+const VERSION = "2.3.2"; // the app version, the same as in package.json (a test checks it)
 const PROTOCOL = 3;
 const STATES = new Set(["working", "waiting", "done", "blocked", "idle"]);
 const WAITING_FOR = new Set([

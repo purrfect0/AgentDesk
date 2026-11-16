@@ -111,6 +111,18 @@
         </div>
         <section class="linked-view hidden" id="tasks-view" role="tabpanel" aria-labelledby="tab-tasks">
           <div class="linked-heading"><p>Одна задача — одна карточка. Получение сообщения не означает приёмку задачи.</p><button data-action="task-context-roots" id="task-context-roots" class="hidden">Папки контекста…</button><button data-action="task-new" id="task-new">Назначить задачу…</button></div>
+          <div class="tasks-toolbar">
+            <label for="task-filter">Показать:</label>
+            <select id="task-filter">
+              <option value="all">Все</option>
+              <option value="active">Активные</option>
+              <option value="submitted">Сданы на проверку</option>
+              <option value="blocked">Заблокированы / доработка</option>
+              <option value="accepted">Приняты</option>
+            </select>
+            <input type="search" id="task-search" placeholder="Поиск: номер (AD/AT), задача, агент…" autocomplete="off" spellcheck="false">
+            <span id="task-count" class="sub"></span>
+          </div>
           <p class="peer-warn hidden" id="tasks-unavailable" role="status">Эта версия сервера ещё не поддерживает карточки задач.</p>
           <div class="sunken-panel linked-panel" id="task-list"></div>
         </section>

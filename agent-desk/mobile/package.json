@@ -1,6 +1,6 @@
 {
   "name": "agent-desk-mobile",
-  "version": "2.3.1",
+  "version": "2.3.2",
   "private": true,
   "description": "Agent Desk для Android: те же агенты и напоминания, что на ПК, по Wi-Fi",
   "scripts": {

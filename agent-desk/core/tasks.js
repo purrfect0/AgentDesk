@@ -399,7 +399,8 @@ class TaskService {
       const id = uuid(ev.task_id, "task_id");
       task = this.desk.state.tasks[id] ? this.get(id) : null;
     } else {
-      const matches = Object.values(this.desk.state.tasks).filter((t) => t.project === project && t.title === title && this._same(t.assignment.agent, agent, project));
+      const matches = Object.values(this.desk.state.tasks).filter((t) => t.project === project && t.title === title && this._same(t.assignment.agent, agent, project)
+        && (t.managed_assignment || ((!ev.device_id || t.assignment.device_id === ev.device_id) && (!t.assignment.session_id || !ev.session || t.assignment.session_id === ev.session))));
       task = matches.length === 1 ? clone(matches[0]) : null;
     }
     const legacy = !ev.task_id && !task?.managed_assignment;

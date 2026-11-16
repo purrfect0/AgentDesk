@@ -27,7 +27,7 @@ const TODO_ICON = { forward: "envelope_closed-1", reply: "msg_question-2", block
 const stateLabel = (a) => (a.state === "waiting" && WAIT_LABEL[a.waiting_for]) || STATE_LABEL[a.state] || a.state;
 // Forwarded-but-unconfirmed reminders stay visible but no longer need the owner.
 // Delivery/ACK receipts are quiet telemetry, never owner actions or task acceptance.
-const needsAction = (t) => !t.done_at && !t.quiet && !["receipt", "ack", "delivery"].includes(t.kind) && !(t.kind === "forward" && (t.delivered_at || t.forwarded_at || t.acked_at || (t.delivery_target && data?.device_id && t.delivery_target !== data.device_id)));
+const needsAction = (t) => !t.done_at && !t.quiet && !["receipt", "ack", "delivery"].includes(t.kind) && !(t.kind === "forward" && (t.forwarded_at || t.acked_at || (t.delivery_target && data?.device_id && t.delivery_target !== data.device_id)));
 const isForwardPending = (t) => t && !t.done_at && t.kind === "forward";
 const isLocal = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
 // Accent animations: --ph keeps the blink phase tied to the clock (12 s fits the 1 s and 2.4 s
@@ -53,6 +53,9 @@ let online = true;
 let lastUpdated = null;
 let dialogReturnFocus = null;
 let phoneNotify = localStorage.getItem("ad.phoneNotify") !== "0";
+let taskFilter = "all";
+let taskSearch = "";
+let taskRenderLimit = 60;
 const plain = (html) => { const d = document.createElement("div"); d.innerHTML = html; return d.textContent; };
 
 const $ = (sel) => document.querySelector(sel);
@@ -147,7 +150,10 @@ function isStale(a) {
 
 function todoText(t) {
   const who = `<b>${esc(t.agent)}</b>`;
-  if (t.kind === "forward") return t.delivered_at || t.acked_at || t.done_at ? `Сообщение для <b class="to">${esc(t.to)}</b> от ${who}` : `Переслать <b class="to">${esc(t.to)}</b> работу от ${who}`;
+  if (t.kind === "forward") {
+    const handled = t.forwarded_at || t.acked_at || t.done_at || (t.delivery_target && data?.device_id && t.delivery_target !== data.device_id);
+    return handled ? `Сообщение для <b class="to">${esc(t.to)}</b> от ${who}` : `Переслать <b class="to">${esc(t.to)}</b> работу от ${who}`;
+  }
   if (t.kind === "reply") return `${who} ждёт вашего ответа`;
   if (t.kind === "limit") return `${who}: закончился лимит модели`;
   return `${who} заблокирован`;
@@ -158,18 +164,31 @@ function todoStatus(t) {
   if (t.done_at) return "закрыто";
   if (t.routing) return `отправляю → «${esc(t.routing.name)}»…`;
   if (t.kind === "forward") {
-    if (t.delivered_at) return "доставлено · ожидает получения";
-    if (t.delivery_target && t.delivery_target !== data?.device_id) return "ожидает доставки";
+    if (t.delivery_target && t.delivery_target !== data?.device_id) {
+      return t.delivered_at ? "доставлено на другой ПК · ожидает получения" : "ожидает доставки";
+    }
     if (t.forwarded_at) return "переслано · ожидает получения";
     return "<b>не переслано</b>";
   }
   return { reply: "<b>ждёт ответа</b>", limit: "<b>нужна новая сессия</b>", blocked: "<b>нужна помощь</b>" }[t.kind] || "";
 }
 
+function fromDeviceLabel(t) {
+  const fd = t?.from_device;
+  if (!fd) return "";
+  if (fd.id && data?.device_id && fd.id === data.device_id) return "";
+  if (fd.id) {
+    const label = deviceLabel(fd.id);
+    if (label !== "другой компьютер" && label !== "компьютер не указан") return label;
+  }
+  return fd.name && !/^[0-9a-f]{16}$/i.test(fd.name) ? fd.name : "другой компьютер";
+}
+
 // PC <-> laptop (core/peers.js): which computer a reminder came from, why it was not sent.
 function peerNote(t) {
   const parts = [];
-  if (t.from_device) parts.push(`с «${esc(t.from_device.name)}»`);
+  const fromName = fromDeviceLabel(t);
+  if (fromName) parts.push(`с «${esc(fromName)}»`);
   if (t.send_error && !t.done_at) parts.push(`<span class="bad">не отправилось: ${esc(t.send_error)}</span>`);
   return parts.length ? ` <span class="sub peer-note">· ${parts.join(" · ")}</span>` : "";
 }
@@ -248,9 +267,9 @@ function render() {
       const text = esc(stale ? `${stateLabel(a)}? активность не подтверждена ${ago(a.updated)}` : stateLabel(a));
       const attn = stale || agentNeedsYou(a);
       const cls = [stale && "stale", attn && "attn"].filter(Boolean).join(" ");
-      return `<tr class="${cls}" data-key="a:${esc(key)}" data-agent="${esc(key)}"${attn ? ` data-since="${esc(a.updated)}" style="${accent(a.updated)}"` : ""}>
+      return `<tr class="${cls}" tabindex="0" data-key="a:${esc(key)}" data-agent="${esc(key)}"${attn ? ` data-since="${esc(a.updated)}" style="${accent(a.updated)}"` : ""}>
         <td class="c-ico"><img src="${icon(stale ? STATE_ICON.stale : STATE_ICON[a.state])}" alt=""></td>
-        <td><b>${esc(a.agent)}</b>${a.device_id ? `<br><span class="sub">${esc(deviceLabel(a.device_id))}</span>` : ""}</td>
+        <td><b>${esc(a.agent)}</b><br><span class="sub">${esc(deviceLabel(a.device_id || data.device_id))}</span></td>
         <td class="nowrap state">${text}${a.state === "done" && a.to ? ` → ${esc(a.to)}` : ""}</td>
         <td class="task opt" title="${esc(a.task)}">${esc(a.task)}</td>
         <td class="nowrap">${esc(ago(a.updated))}</td></tr>`;
@@ -327,9 +346,10 @@ function renderTodos() {
     const act = needsAction(t);
     const cls = t.done_at ? "closed" : act ? `attn${t.kind === "forward" ? " attn-forward" : ""}` : "pending";
     const ico = t.kind === "forward" && t.forwarded_at ? "envelope_open_sheet-1" : TODO_ICON[t.kind];
-    return `<tr class="${cls}" data-key="t:${t.id}" data-todo="${t.id}"${act ? ` data-since="${esc(t.created)}" style="${accent(t.created)}"` : ""}>
+    const card = t.display_id || `AD-${t.id}`;
+    return `<tr class="${cls}" tabindex="0" data-key="t:${t.id}" data-todo="${t.id}"${act ? ` data-since="${esc(t.created)}" style="${accent(t.created)}"` : ""}>
       <td class="c-ico"><img src="${icon(ico)}" alt=""></td>
-      <td>${todoText(t)}${t.task ? `: <span class="sub">${esc(t.task)}</span>` : ""}${peerNote(t)}</td>
+      <td><code class="card-id">${esc(card)}</code>${todoText(t)}${t.task ? `: <span class="sub">${esc(t.task)}</span>` : ""}${peerNote(t)}</td>
       <td class="nowrap status">${todoStatus(t)}</td>
       <td class="nowrap opt">${esc(ago(t.created))}</td></tr>`;
   }));
@@ -382,6 +402,15 @@ function receiptsMarkup(t) {
     ["delivered_at", "доставлено на доску"], ["forwarded_at", "переслано"], ["acked_at", "ACK: получено"], ["done_at", "напоминание закрыто"]
   ].filter(([k]) => r[k]).map(([k, title]) => `<span title="${esc(r[k])}">${title}</span>`).join(" · ") || "ожидает доставки"}</li>`).join("");
 }
+function taskMatches(t) {
+  const q = taskSearch.trim().toLowerCase();
+  if (q && ![taskCardNumber(t), t.title, t.task, t.project, t.assignment?.agent].some(v => String(v || "").toLowerCase().includes(q))) return false;
+  if (taskFilter === "active") return ["assigned", "working", "rework", "blocked"].includes(t.state);
+  if (taskFilter === "submitted") return t.state === "submitted";
+  if (taskFilter === "blocked") return ["blocked", "rework"].includes(t.state);
+  if (taskFilter === "accepted") return t.state === "accepted";
+  return true;
+}
 function renderTasks() {
   const supported = data.tasks !== undefined;
   $("#tasks-unavailable").classList.toggle("hidden", supported);
@@ -389,8 +418,16 @@ function renderTasks() {
   const localOwner = isLocal && AD_HOST.kind !== "mobile";
   $("#task-context-roots").classList.toggle("hidden", !localOwner);
   $("#task-context-roots").disabled = !online || data.config.task_repo_roots === undefined || data.config.task_skill_roots === undefined;
-  const tasks = taskList().filter(inProject).sort((a, b) => String(b.updated || "").localeCompare(String(a.updated || "")));
-  patch($("#task-list"), tasks.length ? tasks.map((t) => {
+  const filterSel = $("#task-filter");
+  if (filterSel && filterSel.value !== taskFilter) filterSel.value = taskFilter;
+  const searchInp = $("#task-search");
+  if (searchInp && searchInp.value !== taskSearch) searchInp.value = taskSearch;
+  const all = taskList().filter(inProject).sort((a, b) => String(b.updated || "").localeCompare(String(a.updated || "")));
+  const tasks = all.filter(taskMatches);
+  const shown = tasks.slice(0, taskRenderLimit);
+  const countEl = $("#task-count");
+  if (countEl) countEl.textContent = all.length ? `${tasks.length === all.length ? `карточек: ${tasks.length}` : `${tasks.length} из ${all.length}`}` : "";
+  patch($("#task-list"), shown.length ? shown.map((t) => {
     const a = t.assignment || {};
     const coordinator = canCoordinate(t);
     const readonly = !online ? "Нет связи — только просмотр" : !coordinator ? "Назначение и передача — на компьютере ведущего" : "";
@@ -402,22 +439,50 @@ function renderTasks() {
       <details><summary>Сообщения и квитанции (${taskReceiptRows(t).length})</summary><ul class="receipt-list">${receiptsMarkup(t)}</ul><p class="sub">ACK подтверждает только получение, а не выполнение или приёмку.</p></details>
       <div class="task-actions"><button data-task-action="details" data-task-id="${esc(t.task_id)}">Подробно…</button><button data-task-action="context" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Контекст / копировать…</button><button data-task-action="assign" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Назначить…</button><button data-task-action="transition" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Состояние…</button><button data-task-action="handoff" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Передать…</button></div>
       ${readonly ? `<p class="sub">${readonly}</p>` : ""}</article>`;
-  }).join("") : `<p class="empty">${supported ? "Задач пока нет. Назначьте первую задачу; номер карточки сохранится при смене сессии." : "Ожидается сервер с поддержкой задач."}</p>`);
+  }).join("") + (tasks.length > shown.length ? `<div class="tasks-more"><button data-action="tasks-show-all">Показать все карточки (${tasks.length})</button></div>` : "")
+    : `<p class="empty">${supported ? (all.length ? "Ничего не найдено по фильтру или поиску." : "Задач пока нет. Назначьте первую задачу; номер карточки сохранится при смене сессии.") : "Ожидается сервер с поддержкой задач."}</p>`);
 }
 function taskDetails(t) {
   const cp = t.checkpoint || {};
-  const kv = (k, v) => v === undefined || v === null || v === "" ? "" : `<dt>${esc(k)}</dt><dd>${esc(typeof v === "object" ? JSON.stringify(v, null, 2) : v)}</dd>`;
-  dialog("Задача — подробности", `<h2 class="task-title"><code>${esc(taskCardNumber(t))}</code> — ${esc(t.title || t.task)}</h2><dl class="kv">${kv("Карточка", taskCardNumber(t))}${kv("Состояние", TASK_LABEL[t.state] || t.state)}${kv("Исполнитель", t.assignment?.agent)}${kv("Компьютер", deviceLabel(t.assignment?.device_id))}${kv("Сессия", sessionLabel(t))}${kv("Ведущий", deviceLabel(t.coordinator_device_id))}${["repo", "branch", "commit", "report", "manifest", "next_step", "constraints", "skills"].map((k) => kv(k, cp[k])).join("")}</dl>
-    ${technicalDetails(t)}<h3>Артефакты</h3>${listValues(t.artifacts).length ? `<ul class="receipt-list">${listValues(t.artifacts).map((a) => `<li><code>${esc(a.path)}</code> · ${esc(a.status || "не проверен")}<br><code>${esc(a.hash || a.sha256 || "SHA не указан")}</code></li>`).join("")}</ul>` : "<p>Артефактов пока нет.</p>"}
-    <h3>История задачи</h3><ul class="receipt-list">${(t.history || []).slice(-12).reverse().map((h) => `<li>${esc(h.time || h.at || "")} · ${esc(TASK_LABEL[h.state] || h.action || h.state || "событие")}${h.note ? ` · ${esc(h.note)}` : ""}</li>`).join("") || "<li>Истории пока нет.</li>"}</ul><div class="buttons"><button data-close>Закрыть</button></div>`);
+  const kv = (k, v) => v === undefined || v === null || v === "" ? "" : `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`;
+  const kvList = (k, items) => Array.isArray(items) && items.length ? `<dt>${esc(k)}</dt><dd><ul class="kv-list">${items.map(s => `<li>${esc(typeof s === "string" ? s : (s?.name ? `${s.name} (${s.path})` : s?.path || JSON.stringify(s)))}</li>`).join("")}</ul></dd>` : "";
+  const cpRows = [kv("Репозиторий", cp.repo), kv("Ветка", cp.branch), kv("Коммит", cp.commit), kv("Отчёт", cp.report), kv("Следующий шаг", cp.next_step), kvList("Ограничения", cp.constraints), kvList("Выбранные skills", cp.skills), kvList("Манифест", cp.manifest)].join("");
+  const history = (t.history || []).slice(-12).reverse();
+  dialog("Задача — подробности", `<h2 class="task-title"><code>${esc(taskCardNumber(t))}</code> — ${esc(t.title || t.task)}</h2><dl class="kv">${kv("Карточка", taskCardNumber(t))}${kv("Состояние", TASK_LABEL[t.state] || t.state)}${kv("Исполнитель", t.assignment?.agent)}${kv("Компьютер", deviceLabel(t.assignment?.device_id))}${kv("Сессия", sessionLabel(t))}${kv("Ведущий", deviceLabel(t.coordinator_device_id))}${cpRows}</dl>
+    ${technicalDetails(t)}<h3>Артефакты</h3>${listValues(t.artifacts).length ? `<ul class="receipt-list">${listValues(t.artifacts).map((a) => `<li><code>${esc(a.path)}</code> · ${esc(a.status || "не проверен")}<br><code class="sub" title="${esc(a.hash || a.sha256 || "")}">SHA-256: ${esc((a.hash || a.sha256 || "не указан").slice(0, 16))}${(a.hash || a.sha256) ? "…" : ""}</code></li>`).join("")}</ul>` : "<p>Артефактов пока нет.</p>"}
+    <h3>История задачи</h3><ul class="receipt-list">${history.map((h) => `<li>${esc(h.time ? `${hhmm(h.time)} · ${ago(h.time)}` : (h.at || ""))} · ${esc(TASK_LABEL[h.state] || h.action || h.state || "событие")}${h.actor?.agent ? ` · ${esc(h.actor.agent)}` : h.agent ? ` · ${esc(h.agent)}` : ""}${h.note ? ` · ${esc(h.note)}` : ""}</li>`).join("") || "<li>Истории пока нет.</li>"}</ul><div class="buttons"><button data-close>Закрыть</button></div>`, null, { wide: true });
 }
 function checksMarkup(checks) {
   if (!checks || (typeof checks === "object" && !Object.keys(checks).length)) return "Проверки не предоставлены сервером — состояние репозитория не подтверждено.";
-  // Render server verification metadata as text, not executable instructions or HTML.
   return typeof checks === "string" ? checks : JSON.stringify(checks, null, 2);
 }
+function checksSummaryHtml(checks) {
+  if (!checks) return "<p>Проверки не предоставлены сервером — состояние репозитория не подтверждено.</p>";
+  if (typeof checks === "string") return `<p>${esc(checks)}</p>`;
+  const lines = [];
+  const repo = checks.repo || {};
+  if (repo.status === "verified") lines.push(`Репозиторий: проверен локально${repo.branch ? ` · ветка ${esc(repo.branch)}` : " · detached HEAD"}${repo.clean_tracked === false ? " · есть незакоммиченные изменения" : ""}${repo.commit_matches_head === false ? " · checkpoint-коммит не совпадает с HEAD" : ""}`);
+  else if (repo.status === "blocked") lines.push(`Репозиторий: проверка заблокирована (${esc(repo.reason || "путь не разрешён")})`);
+  else lines.push("Репозиторий: проверка не запрашивалась");
+  const rp = checks.remote_push || {};
+  if (rp.status === "local_remote_tracking_evidence") lines.push(`Push: только кэшированные локальные remote-tracking refs (${(rp.refs || []).map(esc).join(", ")}); удалённый push не подтверждён`);
+  else lines.push("Push: не проверен (без fetch/push)");
+  const arts = listValues(checks.artifacts || []);
+  if (arts.length) lines.push(`Артефакты: ${arts.map(a => `${esc(a.path)} — ${esc(a.status)}${a.reason ? ` (${esc(a.reason)})` : ""}`).join("; ")}`);
+  const skills = listValues(checks.skills || []);
+  if (skills.length) lines.push(`Skills: ${skills.map(s => `${esc(s.path)} — ${esc(s.status)}${s.reason ? ` (${esc(s.reason)})` : ""}`).join("; ")}`);
+  if (checks.report?.status) lines.push(`Отчёт: ${esc(checks.report.status)} (содержимое не читалось)`);
+  const launchStatus = typeof checks.launch === "object" ? checks.launch?.status : checks.launch;
+  if (launchStatus === "needs_manual_launch") lines.push("Запуск: вручную — скопируйте контекст в сессию агента, автозапуск не выполняется");
+  else if (launchStatus) lines.push(`Запуск: ${esc(launchStatus)}`);
+  const extra = Object.entries(checks).filter(([k]) => !["repo", "remote_push", "artifacts", "skills", "report", "launch"].includes(k));
+  if (extra.length) lines.push(...extra.map(([k, v]) => `${esc(k)}: ${esc(typeof v === "object" ? JSON.stringify(v) : v)}`));
+  return `<ul>${lines.map(l => `<li>${l}</li>`).join("")}</ul>`;
+}
 function contextDialog(t, result, title = "Контекст задачи — локальные проверки") {
-  dialog(title, `<p>Карточка <code>${esc(taskCardNumber(t))}</code>. Проверки выполняются сервером только локально; копирование не запускает агента.</p><h3 id="context-checks-label">Результаты проверок (включая предупреждения)</h3><pre id="context-checks" class="context-checks" aria-labelledby="context-checks-label" tabindex="0">${esc(checksMarkup(result.checks))}</pre>
+  dialog(title, `<p>Карточка <code>${esc(taskCardNumber(t))}</code>. Проверки выполняются сервером только локально; копирование не запускает агента.</p>
+    <div class="context-checks-summary">${checksSummaryHtml(result.checks)}</div>
+    <details class="technical-details"><summary>Технические данные проверок (JSON)</summary><pre id="context-checks" class="context-checks" tabindex="0">${esc(checksMarkup(result.checks))}</pre></details>
     <label for="task-context">Контекст для новой сессии</label><textarea id="task-context" readonly></textarea><p id="context-result" role="status"></p><div class="buttons"><button id="copy-context"${typeof result.text === "string" && result.text.trim() ? "" : " disabled"}>Копировать контекст</button><button data-close>Закрыть</button></div>`, (node) => {
     const ta = node.querySelector("#task-context"); ta.value = typeof result.text === "string" ? result.text : "";
     node.querySelector("#copy-context").onclick = async () => {
@@ -425,7 +490,7 @@ function contextDialog(t, result, title = "Контекст задачи — л�
       node.querySelector("#context-result").textContent = ok ? "Контекст скопирован. Запустите/подключите новую сессию вручную, если адаптер не поддерживает запуск." : "Буфер обмена недоступен: выделите контекст и скопируйте вручную.";
       if (!ok) { ta.focus(); ta.select(); }
     };
-  });
+  }, { wide: true });
 }
 async function fetchTaskContext(t) {
   dialog("Контекст задачи", '<p role="status">Проверяю локальный checkpoint…</p><div class="buttons"><button data-close>Отмена</button></div>');
@@ -850,13 +915,14 @@ async function act(path, body) {
 
 // --- dialogs --------------------------------------------------------------------
 
-function dialog(title, html, onMount) {
+function dialog(title, html, onMount, opts = {}) {
   const layer = $("#modal-layer");
   if (layer.classList.contains("hidden")) dialogReturnFocus = document.activeElement;
   const node = $("#tpl-dialog").content.firstElementChild.cloneNode(true);
   node.setAttribute("role", "dialog");
   node.setAttribute("aria-modal", "true");
   node.setAttribute("aria-label", title);
+  if (opts.wide) node.classList.add("dialog-wide");
   node.querySelector(".title-bar-text").textContent = title;
   node.querySelector(".window-body").innerHTML = html;
   const close = closeDialog;
@@ -864,7 +930,9 @@ function dialog(title, html, onMount) {
   layer.innerHTML = "";
   layer.appendChild(node);
   layer.classList.remove("hidden");
-  node.querySelector(".buttons button")?.focus();
+  const focusables = [...node.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, a[href], [tabindex="0"]')].filter((n) => n.getClientRects().length);
+  const preferred = focusables.find((n) => !n.hasAttribute("data-close") && n.nodeName !== "BUTTON") || focusables[0];
+  preferred?.focus();
   onMount?.(node, close);
 }
 
@@ -999,6 +1067,7 @@ function peersLive(canPair) {
 const ACTIONS = {
   "task-new"() { taskMutationDialog("assign", null); },
   "task-context-roots"() { contextRootsDialog(); },
+  "tasks-show-all"() { taskRenderLimit = Number.MAX_SAFE_INTEGER; renderTasks(); },
   "file-tools"() { tab = "mail"; render(); },
   "mail-roots"() { mailRootsDialog(); },
   async "file-toggle"() {
@@ -1246,21 +1315,21 @@ const ACTIONS = {
     if (!item) return;
     history = data.events.filter((e) => e.project === item.project && e.agent === item.agent && (!item.device_id || (e.device_id ? e.device_id === item.device_id : item.device_id === data.device_id))).slice(-8).reverse();
     const kv = (k, v) => (v ? `<dt>${k}</dt><dd>${esc(v)}</dd>` : "");
-    const when = (iso) => iso && `${hhmm(iso)}, ${ago(iso)}`;
+    const when = (iso) => iso && `${hhmm(iso)} · ${ago(iso)}`;
     const isTodo = selected.type === "todo";
     const head = isTodo
       ? `${kv("Задача", item.task)}${kv("Кому переслать", item.to)}${kv("Заметка", item.note)}${kv("Результат", item.result)}
          ${kv("Карточка", item.display_id || `AD-${item.id}`)}${kv("Доставлено", when(item.delivered_at))}${kv("Переслано", when(item.forwarded_at))}${kv("Получено агентом", when(item.acked_at))}
-         ${kv("Пришло с компьютера", item.from_device?.name)}${kv("Отправлено на", item.sent_to && `«${item.sent_to.name}», ${when(item.sent_to.at)}${item.sent_to.auto ? " (само)" : ""}`)}${kv("Не отправилось", !item.done_at && item.send_error)}`
+         ${kv("Пришло с компьютера", fromDeviceLabel(item))}${kv("Отправлено на", item.sent_to && `«${item.sent_to.name}», ${when(item.sent_to.at)}${item.sent_to.auto ? " (само)" : ""}`)}${kv("Не отправилось", !item.done_at && item.send_error)}`
       : `${kv("Состояние", stateLabel(item))}${kv("Этап", item.phase)}${kv("Задача", item.task)}${kv("Кому переслать", item.to)}
-         ${kv("Заметка", item.note)}${kv("Результат", item.result)}${kv("Устройство", deviceLabel(item.device_id))}${kv("Сессия", sessionLabel(item))}${kv("Обновлено", when(item.updated))}`;
-    const msg = isTodo && item.message ? `<details><summary>Текст для передачи агенту</summary><textarea readonly class="msg-text"></textarea></details>` : "";
-    dialog(`${isTodo ? `${item.display_id || `AD-${item.id}`} — ` : ""}${item.agent} — ${item.project}`, `<dl class="kv">${head}</dl>${technicalDetails(item)}${msg}
-      <div class="sunken-panel" style="max-height:160px"><table><thead><tr><th>Время</th><th>Событие</th><th>Задача</th></tr></thead><tbody>
+         ${kv("Заметка", item.note)}${kv("Результат", item.result)}${kv("Устройство", deviceLabel(item.device_id || data.device_id))}${kv("Сессия", sessionLabel(item))}${kv("Обновлено", when(item.updated))}`;
+    const msgBlock = isTodo && item.message ? `<h3>Сообщение</h3><div class="msg-body"></div><p class="sub">«Копировать» добавляет заголовок Agent Desk и message_id для квитанции агента.</p>` : "";
+    const historyBlock = history.length ? `<h3>Последние события</h3><div class="sunken-panel" style="max-height:160px"><table><thead><tr><th>Время</th><th>Событие</th><th>Задача</th></tr></thead><tbody>
       ${history.map((e) => `<tr><td class="nowrap">${hhmm(e.time)}</td><td class="nowrap">${esc(stateLabel(e))}${e.to ? ` → ${esc(e.to)}` : ""}</td><td>${esc(e.task)}</td></tr>`).join("")}
-      </tbody></table></div>
-      <div class="buttons">${msg ? `<button data-action="copy-message">Копировать</button>` : ""}<button data-close>OK</button></div>`,
-    (node) => { const ta = node.querySelector(".msg-text"); if (ta) ta.value = forwardText(item); });
+      </tbody></table></div>` : "";
+    dialog(`${isTodo ? `${item.display_id || `AD-${item.id}`} — ` : ""}${item.agent} — ${item.project}`, `<dl class="kv">${head}</dl>${technicalDetails(item)}${msgBlock}${historyBlock}
+      <div class="buttons">${isTodo && item.message ? `<button data-action="copy-message">Копировать</button>` : ""}<button data-close>OK</button></div>`,
+    (node) => { const mb = node.querySelector(".msg-body"); if (mb) mb.textContent = item.message; }, { wide: true });
   },
   async "copy-message"(e) {
     const todo = selected?.type === "todo" && data.todos.find((t) => t.id === selected.id);
@@ -1409,10 +1478,14 @@ document.addEventListener("mouseover", (e) => {
   }
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeDialog();
   const inDialog = !$("#modal-layer").classList.contains("hidden");
+  if (e.key === "Escape") {
+    const openMenu = document.querySelector(".menu.open");
+    if (openMenu) { openMenu.classList.remove("open"); return; }
+    if (inDialog) { closeDialog(); return; }
+  }
   if (inDialog && e.key === "Tab") {
-    const controls = [...$("#modal-layer").querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]')].filter((n) => n.getClientRects().length);
+    const controls = [...$("#modal-layer").querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, a[href], [tabindex="0"]')].filter((n) => n.getClientRects().length);
     const first = controls[0], last = controls[controls.length - 1];
     if (first && e.shiftKey && (document.activeElement === first || !$("#modal-layer").contains(document.activeElement))) { e.preventDefault(); last.focus(); }
     else if (first && !e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
@@ -1424,9 +1497,21 @@ document.addEventListener("keydown", (e) => {
     const i = tabs.indexOf(currentTab);
     const next = e.key === "Home" ? tabs[0] : e.key === "End" ? tabs[tabs.length - 1] : ["Enter", " "].includes(e.key) ? currentTab : tabs[(i + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
     next.click(); next.focus();
+    return;
+  }
+  const row = e.target.closest?.("tr[data-todo], tr[data-agent]");
+  if (row && !inDialog && ["ArrowUp", "ArrowDown", "Enter", " "].includes(e.key)) {
+    e.preventDefault();
+    if (["Enter", " "].includes(e.key)) { row.click(); ACTIONS.details(); return; }
+    const rows = [...row.closest("tbody").querySelectorAll("tr[data-todo], tr[data-agent]")];
+    const next = rows[(rows.indexOf(row) + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length];
+    next.click(); next.focus();
+    return;
   }
   if (!inDialog && !e.target.closest("input, textarea, select, [contenteditable]") && e.key === "Delete" && selected?.type === "todo") ACTIONS["done-selected"]();
 });
+$("#task-filter")?.addEventListener("change", (e) => { taskFilter = e.target.value; taskRenderLimit = 60; renderTasks(); });
+$("#task-search")?.addEventListener("input", (e) => { taskSearch = e.target.value; taskRenderLimit = 60; renderTasks(); });
 
 // --- desktop app window (Electron: desktop/preload.js gives window.agentDesk) -----
 

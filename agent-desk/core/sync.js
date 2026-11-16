@@ -69,7 +69,7 @@ class SyncJournal {
   entities() {
     const s = this.desk.state, out = new Map();
     for (const t of s.todos) {
-      const { id, routing, warning, send_error, sent_to, forward_text, ...data } = t;
+      const { id, routing, warning, send_error, sent_to, from_device, forward_text, ...data } = t;
       out.set(`todo:${t.message_id}`, data);
     }
     for (const [k, a] of Object.entries(s.agents)) {
@@ -135,10 +135,18 @@ class SyncJournal {
         if ((data.receipt_epoch || 0) < (old.receipt_epoch || 0)) return;
         s.todos[pos] = { ...data, id: old.id, display_id: old.display_id,
           delivered_at: old.delivered_at || data.delivered_at,
+          ...(old.from_device && old.from_device.id !== this.desk.config.device_id ? { from_device: old.from_device } : {}),
           ...(sameReceipt && old.done_at ? { done_at: old.done_at } : {}),
           ...(sameReceipt && old.acked_at ? { acked_at: old.acked_at, acked_by: old.acked_by, done_at: old.done_at, forwarded_at: old.forwarded_at } : {}) };
       }
-      else { const id = s.next_id++; s.todos.push({ ...data, id, display_id: `AD-${id}`, from_device: { id: ev.origin, name: ev.origin } }); }
+      else {
+        const id = s.next_id++;
+        const peer = this.desk.config.peers?.find(p => p.id === ev.origin);
+        const fromDevice = ev.origin && ev.origin !== this.desk.config.device_id
+          ? { id: ev.origin, name: peer?.name || "другой компьютер" }
+          : undefined;
+        s.todos.push({ ...data, id, display_id: `AD-${id}`, ...(fromDevice ? { from_device: fromDevice } : {}) });
+      }
     } else if (ev.type === "agent") {
       if (!data) delete s.remote_agents[ev.entity_id];
       else if (data.device_id !== this.desk.config.device_id) s.remote_agents[ev.entity_id] = data;
@@ -183,9 +191,12 @@ class SyncJournal {
     finally { this.importing = false; }
     if (events.length) {
       for (const t of this.desk.state.todos) {
-        if (!t.done_at && !t.acked_at && !before.todos.some(old => old.message_id === t.message_id)) {
-          const peer = this.desk.config.peers?.find(p => p.id === t.origin_device_id);
-          this.desk._remind?.(t, { from: peer?.name || t.origin_device_id });
+        if (!t.done_at && !t.acked_at && (!t.delivery_target || t.delivery_target === this.desk.config.device_id) && !before.todos.some(old => old.message_id === t.message_id)) {
+          const fromId = t.from_device?.id || t.origin_device_id;
+          if (fromId === this.desk.config.device_id) continue;
+          const peer = this.desk.config.peers?.find(p => p.id === fromId);
+          const fromName = peer?.name || (t.from_device?.name && !/^[0-9a-f]{16}$/i.test(t.from_device.name) ? t.from_device.name : "другой компьютер");
+          this.desk._remind?.(t, { from: fromName });
         }
       }
       this.desk.emit("change");

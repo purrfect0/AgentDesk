@@ -145,6 +145,18 @@ test("legacy matching honors canonical agent names when provided by desk", () =>
   assert.equal(second.assignment.agent, "Worker");
 });
 
+test("unmanaged legacy task is not hijacked by a different session or device report", () => {
+  const { desk, service } = fixture();
+  const first = service.observe(marker({ device_id: "desktop-a", session: "session-a" }));
+  const otherSession = service.observe(marker({ device_id: "desktop-a", session: "session-b", seq: 1, event_id: "other-session" }));
+  assert.notEqual(otherSession.task_id, first.task_id);
+  const otherDevice = service.observe(marker({ device_id: "desktop-b", session: "session-a", seq: 1, event_id: "other-device" }));
+  assert.notEqual(otherDevice.task_id, first.task_id);
+  const same = service.observe(marker({ device_id: "desktop-a", session: "session-a", seq: 2, state: "done", event_id: "same-session" }));
+  assert.equal(same.task_id, first.task_id);
+  assert.equal(same.state, "submitted");
+});
+
 test("observed explicit IDs require epoch/session and validate project identity", () => {
   const { desk, service } = fixture();
   const taskId = crypto.randomUUID();
