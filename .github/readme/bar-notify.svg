@@ -9,7 +9,7 @@ text{font-family:W98,Tahoma,"MS Sans Serif",sans-serif;font-size:11px}</style><r
 <rect x="2" y="2" width="836" height="20" fill="#c0c0c0"/><defs><linearGradient id="b9" x1="0" x2="1"><stop offset="0" stop-color="#000080"/><stop offset="1" stop-color="#1084d0"/></linearGradient></defs>
 <rect x="3" y="3" width="834" height="18" fill="url(#b9)"/>
 <image href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQBAMAAADt3eJSAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAAFVBMVEUAAACAgIAAAAD//////wCAgADAwMCWHdi7AAAAAXRSTlMAQObYZgAAAAFiS0dEAxEMTPIAAAAHdElNRQfiBhgXBTYmEU7QAAAATUlEQVQI12NgwA0YBcFAgYHR2BkInYAMZRBLFchIAtJGgUCGm7KzsWoiSE2QsVMYiOGaqqSaCmKEpYWGpYHUpIEASARmIJMSGChg2gkAOxMQgim3QZAAAAAldEVYdGRhdGU6Y3JlYXRlADIwMTgtMDYtMjRUMjM6MDU6NTQtMDQ6MDAB8pOGAAAAJXRFWHRkYXRlOm1vZGlmeQAyMDE4LTA2LTI0VDIzOjA1OjU0LTA0OjAwcK8rOgAAAABJRU5ErkJggg==" x="6" y="4" width="16" height="16" style="image-rendering:pixelated"/>
-<text x="26" y="16" fill="#fff" font-weight="bold">Уведомления на телефоне</text>
+<text x="26" y="16" fill="#fff" font-weight="bold">Уведомления и тихие часы</text>
 <rect x="783" y="5" width="16" height="14" fill="#0a0a0a"/>
 <rect x="783" y="5" width="15" height="13" fill="#dfdfdf"/>
 <rect x="784" y="6" width="14" height="12" fill="#808080"/>

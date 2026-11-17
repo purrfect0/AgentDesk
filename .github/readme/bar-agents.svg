@@ -9,7 +9,7 @@ text{font-family:W98,Tahoma,"MS Sans Serif",sans-serif;font-size:11px}</style><r
 <rect x="2" y="2" width="836" height="20" fill="#c0c0c0"/><defs><linearGradient id="b5" x1="0" x2="1"><stop offset="0" stop-color="#000080"/><stop offset="1" stop-color="#1084d0"/></linearGradient></defs>
 <rect x="3" y="3" width="834" height="18" fill="url(#b5)"/>
 <image href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgBAMAAACBVGfHAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAAGFBMVEUAAAAAAADAwMD///8AAP+AgICAAAD/AAA1uiriAAAAAXRSTlMAQObYZgAAAAFiS0dEAxEMTPIAAAAHdElNRQfiBhoANiXlpBdAAAAAt0lEQVQoz42RzQ3DIAyFwwYYovYMVgYIbgZAzQI5dAVGaNevm0Bic+qTOPjTs/HPMPwvYNkulsQcADpDD1wCnYHJKuBo1gVxBh3T40ipsSOiHRgJwvVB4BQK9uoggGdwlkCE3dEAt8gvxgY84jN4qsMySKxAtNg2FrKiF8CxAwou29k5G+6fMhVbwc9xK+9SoOZgjFHsy0Caxe4YIE6bOgiXUGDMHl/iRGZds9uyAMBkzP0VZaz1BfY4IONdZ1R7AAAAJXRFWHRkYXRlOmNyZWF0ZQAyMDE4LTA2LTI2VDAwOjU0OjM3LTA0OjAws+TK4AAAACV0RVh0ZGF0ZTptb2RpZnkAMjAxOC0wNi0yNlQwMDo1NDozNy0wNDowMMK5clwAAAAASUVORK5CYII=" x="6" y="4" width="16" height="16" style="image-rendering:pixelated"/>
-<text x="26" y="16" fill="#fff" font-weight="bold">Агентам</text>
+<text x="26" y="16" fill="#fff" font-weight="bold">Агентам: маркеры, CLI и MCP</text>
 <rect x="783" y="5" width="16" height="14" fill="#0a0a0a"/>
 <rect x="783" y="5" width="15" height="13" fill="#dfdfdf"/>
 <rect x="784" y="6" width="14" height="12" fill="#808080"/>
