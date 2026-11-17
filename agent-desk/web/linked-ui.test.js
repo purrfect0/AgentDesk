@@ -793,5 +793,32 @@ if (process.argv.includes("--serve")) {
     assert.match(h.mounted.at(-1).title, /Тихие часы|Уведомления/i);
     h.run("window.abDiagnostics()");
     assert.match(h.mounted.at(-1).title, /Диагностика/i);
+
+    // Universal Lead prompt works even when watch=[] (no marker folders configured!)
+    state.config.watch = [];
+    const hEmpty = harness(state);
+    hEmpty.run("ACTIONS.howto()");
+    const howtoDlg = hEmpty.mounted.at(-1);
+    assert.equal(howtoDlg.title, "Инструкция для агентов");
+    const leadTxt = howtoDlg.node.querySelector("#prompt-text").value;
+    assert.match(leadTxt, /Ты — ведущий \(начальник проекта\)/);
+    assert.match(leadTxt, /assign --file/);
+    assert.match(leadTxt, /agent_desk_validate/);
+    assert.match(leadTxt, /400 символов/);
+
+    // Dialog HTML renders role tabs + project tabs (including Demo from registry/tasks even without watch folder)
+    assert.match(howtoDlg.html, /data-howto-role="lead"/);
+    assert.match(howtoDlg.html, /data-howto-role="worker"/);
+    assert.match(howtoDlg.html, /Универсальный \(любой проект\)/);
+    assert.match(howtoDlg.html, />Demo</);
+
+    // Project-scoped Lead prompt pre-fills project & active registry agents; CLI-only worker prompt works without watch path
+    const demoLead = hEmpty.run('leadPrompt(howtoTargets().find((t) => t.project === "Demo"))');
+    assert.match(demoLead, /Проект: "Demo"/);
+    assert.match(demoLead, /Carbon, Codex/);
+    assert.equal(demoLead.includes("RetiredBot"), false);
+    const cliWorker = hEmpty.run('agentPrompt({ project: "Demo", path: "" })');
+    assert.match(cliWorker, /agent_desk_submit/);
+    assert.match(cliWorker, /message_id — глобальный UUID/);
   });
 }

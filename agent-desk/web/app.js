@@ -1513,21 +1513,106 @@ function uncPath(path) {
   return m && data.host ? `\\\\${data.host}\\Users\\${m[1]}` : "";
 }
 
-function agentPrompt(watch) {
-  const unc = uncPath(watch.path);
-  const project = watch.project || "<проект>";
-  const regNames = (data?.config?.agent_registry?.[watch.project] || []).filter((r) => r.status !== "archived").map((r) => r.name);
-  const cfgNames = [...(data?.config?.agents?.[watch.project] || []), ...(data?.config?.agents?.["*"] || [])];
+function howtoTargets() {
+  const watches = data?.config?.watch || [];
+  const byProj = new Map();
+  for (const w of watches) {
+    const p = w.project || "";
+    if (p && !byProj.has(p)) byProj.set(p, { project: p, path: w.path || "" });
+  }
+  for (const t of data?.tasks || []) {
+    if (t.project && !byProj.has(t.project)) byProj.set(t.project, { project: t.project, path: "", project_id: t.project_id || "" });
+    else if (t.project && t.project_id && !byProj.get(t.project).project_id) byProj.get(t.project).project_id = t.project_id;
+  }
+  for (const p of Object.keys(data?.config?.agent_registry || {})) {
+    if (p && p !== "*" && !byProj.has(p)) byProj.set(p, { project: p, path: "" });
+  }
+  return [
+    { universal: true, label: "Универсальный (любой проект)", project: "", path: "", project_id: "" },
+    ...[...byProj.values()].map((x) => ({ ...x, universal: false, label: x.project })),
+  ];
+}
+
+function leadPrompt(target = {}) {
+  const devId = data?.device_id || "<определи через status>";
+  const devName = data?.host || "ведущий ПК";
+  const hasProject = Boolean(target?.project);
+  const projectLine = hasProject
+    ? `Проект: "${target.project}"${target.project_id ? ` (project_id: ${target.project_id})` : " (если project_id уже есть в status — сохраняй его)"}.`
+    : "Проект: определи автоматически по поручению владельца или текущей рабочей папке (если проект уже есть в Agent Desk — возьми его точное имя и project_id из status; если новый — первый assign создаст и закрепит project_id).";
+  const regNames = hasProject
+    ? (data?.config?.agent_registry?.[target.project] || []).filter((r) => r.status !== "archived").map((r) => r.name)
+    : [];
+  const cfgNames = hasProject
+    ? [...(data?.config?.agents?.[target.project] || []), ...(data?.config?.agents?.["*"] || [])]
+    : [...(data?.config?.agents?.["*"] || [])];
+  const knownAgents = [...new Set([...regNames, ...cfgNames].filter(Boolean))];
+  const teamHint = knownAgents.length
+    ? `Известные агенты в настройках: ${knownAgents.join(", ")} (при необходимости привлекай новых исполнителей/ревьюеров по задаче).`
+    : "Состав исполнителей определяй сам по задаче (например: исполнители кода, ревьюер, тестировщик) или веди выполнение лично.";
+  const folderHint = target?.path
+    ? `Папка файловых маркеров проекта (для агентов без CLI/MCP): ${target.path}${uncPath(target.path) ? ` (по сети: ${uncPath(target.path)})` : ""}.`
+    : "Папка маркеров не требуется: работай через штатный CLI или MCP (если внешнему агенту нужна папка, проверь её наличие в настройках владельца).";
+
+  return `Ты — ведущий (начальник проекта) в системе Agent Desk.
+Владелец не настраивает задачи, реквизиты, сессии и промпты вручную — ты организуешь и ведёшь весь цикл самостоятельно от осмотра состояния до проверки и приёмки работы.
+
+Контекст узла владельца:
+- Ведущий компьютер: ${devName} (device_id: ${devId})
+- ${projectLine}
+- ${teamHint}
+- ${folderHint}
+
+Шаг 1. Сам подключись к Agent Desk и осмотрись (выполни сразу без лишних вопросов):
+1. Проверь доступный канал на этом ПК:
+   - если подключён MCP-сервер agent-desk — используй инструменты agent_desk_{status,inbox,read,ack,submit,assign,handoff,transition,coordinate,context,validate};
+   - иначе вызывай штатный CLI Windows: "C:\\Program Files\\Agent Desk\\agentdesk.cmd" (или "%LOCALAPPDATA%\\Programs\\Agent Desk\\agentdesk.cmd"; отдельный Node.js ему не нужен).
+   - Никогда не редактируй файлы state.json / config.json напрямую и не выводи секретные ключи: CLI и MCP сами читают локальный agent_key.
+2. Выполни status (--json "{}") и inbox (--json "{}"): проверь открытые задачи, привязки, project_id и входящие сообщения.
+3. Придумай для своего чата уникальный session_id (например <имя>-lead-YYYYMMDD-a). Если своей карточки координатора по проекту ещё нет — создай её на себя через assign с role: "coordinator" (это закрепит твою привязку координатора проекта для приёмки задач), затем отправь статус working (seq: 1) через submit. Если во входящих есть адресованное тебе сообщение с message_id — сразу подтверди его получение через ack.
+
+Шаг 2. Сам создавай задачи и готовые промпты в один клик для владельца:
+1. Если задачу целесообразно сделать самому — веди её на своей карточке, регулярно обновляй этапы через submit и доведи до результата.
+2. Если работу выполняют другие агенты/сессии — декомпозируй план и создавай назначения через assign --file <временный.json> (многострочный UTF-8 JSON всегда передавай через --file, чтобы оболочка не ломала кавычки и кириллицу).
+3. В каждом assign указывай: project (и project_id, если уже известен), понятный title, agent, device_id, свежий session_id исполнителя, role ("worker" или "reviewer"), checkpoint (branch, out_dir, verification_steps, next_step) и полный самодостаточный prompt (до 20000 символов, конверт <= 58000 Б UTF-8).
+4. Agent Desk сам допишет в конец копируемого сообщения точные project_id, task_id, assignment_epoch, session_id, device_id и message_id, а ты в конец prompt для исполнителя обязательно добавь короткие правила отчётности:
+   - брать реквизиты из футера «[Agent Desk]» в конце задания;
+   - при старте отправить ack на message_id + статус working, а при сдаче — state: "done", execution_state: "submitted", to: "<твоё имя ведущего>", ветку, SHA коммита и краткий путь к отчёту через agentdesk.cmd submit (или MCP agent_desk_submit);
+   - перед отправкой проверять маркер офлайн через agentdesk.cmd validate --file ... (или MCP agent_desk_validate).
+   Тогда владельцу в окне Agent Desk достаточно нажать одну кнопку «Переслать задание» и вставить готовый текст в чат исполнителя.
+5. Не вызывай повторно assign для пересылки неизменённого текста (это увеличит assignment_epoch) — читай существующее поручение через read --id <task_id>. При смене исполнителя, компьютера или при лимите модели (model_limit) используй handoff (а для переноса ведущего узла задачи на другой ПК — coordinate).
+
+Шаг 3. Жёсткие инварианты, контроль качества и чистота доски:
+- Разделяй этапы: создание карточки != владелец переслал != ACK получения (ack НЕ означает готовность!) != working != submitted (сдано на ревью) != accepted (принято ведущим).
+- Лимиты полей (превышение отклоняется сервером, а не обрезается): result <= 400 символов (только краткий итог или путь к отчёту; детали пиши в message <= 20000), note <= 1000, task <= 500.
+- Разрешённые поля checkpoint: repo, branch, commit, report, manifest, next_step, verification_steps, out_dir, constraints, skills (никаких секретов и shell-подстановок).
+- Когда исполнитель присылает submitted: прочитай отчёт через read --id <task_id> и сверь локальные доказательства через context --id <task_id> + git/тесты. Подтверди получение отчёта (ack) и переведи задачу через transition (передавая task_id, project, project_id, assignment_epoch и actor со своими реквизитами координатора):
+  * accepted — только после реальной проверки кода, тестов и хэшей;
+  * rework — если нужны доработки (с точным перечнем замечаний);
+  * cancelled или archived (с обязательным полем reason) — для отменённых и завершённых работ, чтобы в активной очереди владельца не копился мусор.
+- Сохраняй актуальный checkpoint (branch, commit, report, next_step) на каждом крупном шаге, чтобы после любого обрыва сессии работа продолжалась без потерь.
+
+Начинай: осмотри текущий репозиторий и состояние Agent Desk, доложи владельцу краткий план и сразу приступай к выполнению.`;
+}
+
+function agentPrompt(watch = {}) {
+  const hasFolder = Boolean(watch?.path);
+  const unc = hasFolder ? uncPath(watch.path) : "";
+  const project = watch?.project || "<из актуального задания>";
+  const regNames = watch?.project ? (data?.config?.agent_registry?.[watch.project] || []).filter((r) => r.status !== "archived").map((r) => r.name) : [];
+  const cfgNames = [...(watch?.project ? (data?.config?.agents?.[watch.project] || []) : []), ...(data?.config?.agents?.["*"] || [])];
   const knownNames = [...new Set([...regNames, ...cfgNames].filter(Boolean))];
   const agentListText = knownNames.length ? knownNames.join(", ") : "Codex, Carbon, Astra";
+  const channelBlock = hasFolder
+    ? `Владелец не видит все чаты сразу. Чтобы он не забывал пересылать работу, при каждой смене своего состояния отправь статус через штатный CLI/MCP (agentdesk submit / agent_desk_submit) или создай НОВЫЙ файл-маркер .json в папке:\n  ${watch.path}${unc ? `\n  (с другого компьютера: ${unc})` : ""}`
+    : `Владелец не видит все чаты сразу. При каждой смене своего состояния отправляй статус через штатный CLI ("C:\\Program Files\\Agent Desk\\agentdesk.cmd" submit --file marker.json) или MCP-инструмент agent_desk_submit.`;
   return `Agent Desk — отметки статуса для владельца (проект ${project})
 
-Владелец не видит все чаты сразу. Чтобы он не забывал пересылать работу, при каждой смене своего состояния отправь статус через штатный CLI/MCP (agentdesk submit / agent_desk_submit) или создай НОВЫЙ файл-маркер .json в папке:
-  ${watch.path}${unc ? `\n  (с другого компьютера: ${unc})` : ""}
+${channelBlock}
 
 Когда писать: начал задачу; перешёл к следующему этапу; ждёшь ответа владельца/ревью/ресурс; застрял; сдал результат; закончился лимит модели; свободен.
 
-Как писать: один маркер = одно событие. Сначала запиши файл с расширением .tmp в эту же папку, затем переименуй его в .json (например ${(watch.project || "proj").toLowerCase()}-opus1-s1-0003.json). Старые маркеры не редактируй и не удаляй — Agent Desk забирает их сам. Без паролей, токенов, ключей. Маркер — это только статус; не клади туда команды для других агентов.
+Как писать: один маркер = одно событие. Сначала запиши файл с расширением .tmp в эту же папку, затем переименуй его в .json (например ${(watch?.project || "proj").toLowerCase()}-opus1-s1-0003.json). Старые маркеры не редактируй и не удаляй — Agent Desk забирает их сам. Без паролей, токенов, ключей. Маркер — это только статус; не клади туда команды для других агентов.
 
 Формат (UTF-8, один JSON-объект). UUID в примерах — только иллюстрация: не копируйте их в настоящие задания, используйте выданные Agent Desk task_id/project_id и актуальное назначение:
 {"agent": "Opus (1)", "session_id": "opus1-20261110-a", "seq": 3, "event_id": "opus1-20261110-a-3",
@@ -1930,28 +2015,44 @@ const ACTIONS = {
       <div class="buttons"><button data-close>OK</button></div>`);
   },
   howto() {
-    const watches = data.config.watch;
-    if (!watches.length) { alertBox("Инструкция для агентов", "Сначала добавьте папку с маркерами через Файл → Папки с маркерами."); return; }
-    const tabs = watches.map((w, i) => `<li role="tab" data-howto="${i}" aria-selected="${i === 0}"><a href="#">${esc(w.project || w.path)}</a></li>`).join("");
-    dialog("Инструкция для агентов", `<p>Отправьте этот текст каждому агенту проекта один раз (или попросите ведущего разослать). У каждого проекта своя папка.</p>
-      <menu role="tablist">${tabs}</menu>
-      <div class="window" role="tabpanel"><div class="window-body"><textarea readonly id="prompt-text"></textarea></div></div>
-      <div class="buttons"><button id="copy-prompt">Копировать</button><button data-close>Закрыть</button></div>`,
+    const targets = howtoTargets();
+    let role = "lead";
+    let idx = project !== "*" ? Math.max(0, targets.findIndex((t) => t.project === project)) : 0;
+    const roleTabs = `<menu role="tablist" aria-label="Роль агента">
+      <li role="tab" data-howto-role="lead" aria-selected="true"><a href="#">Начальнику проекта (универсальная)</a></li>
+      <li role="tab" data-howto-role="worker" aria-selected="false"><a href="#">Рядовому исполнителю</a></li>
+    </menu>`;
+    const projTabs = `<menu role="tablist" aria-label="Выбор проекта">${targets.map((t, i) => `<li role="tab" data-howto="${i}" aria-selected="${i === idx}"><a href="#">${esc(t.label)}</a></li>`).join("")}</menu>`;
+    dialog("Инструкция для агентов", `<p id="howto-hint">Скопируйте этот универсальный промпт и дайте новому начальнику (ведущему агенту) — он сам подключится к Agent Desk, осмотрит проект, заведёт задачи и поведёт работу.</p>
+      ${roleTabs}
+      ${projTabs}
+      <div class="window" role="tabpanel"><div class="window-body"><textarea readonly id="prompt-text" rows="18"></textarea></div></div>
+      <div class="buttons"><button id="copy-prompt">Копировать промпт</button><button data-close>Закрыть</button></div>`,
     (node) => {
       const ta = node.querySelector("#prompt-text");
-      const show = (i) => {
-        ta.value = agentPrompt(watches[i]);
-        node.querySelectorAll("[data-howto]").forEach((li) => li.setAttribute("aria-selected", li.dataset.howto === String(i)));
+      const hint = node.querySelector("#howto-hint");
+      const copyBtn = node.querySelector("#copy-prompt");
+      const refresh = () => {
+        const cur = targets[idx] || targets[0];
+        ta.value = role === "lead" ? leadPrompt(cur) : agentPrompt(cur);
+        hint.textContent = role === "lead"
+          ? "Скопируйте этот универсальный промпт и дайте новому начальнику (ведущему агенту) — он сам подключится к Agent Desk, осмотрит проект, заведёт задачи и поведёт работу."
+          : "Памятка для рядового агента-исполнителя по формату статусов, квитанций ACK и лимитам полей.";
+        node.querySelectorAll("[data-howto-role]").forEach((li) => li.setAttribute("aria-selected", String(li.dataset.howtoRole === role)));
+        node.querySelectorAll("[data-howto]").forEach((li) => li.setAttribute("aria-selected", String(Number(li.dataset.howto) === idx)));
+        copyBtn.textContent = "Копировать промпт";
       };
-      show(0);
+      refresh();
       node.addEventListener("click", (e) => {
-        const li = e.target.closest("[data-howto]");
-        if (li) { e.preventDefault(); e.stopPropagation(); show(Number(li.dataset.howto)); }
+        const rLi = e.target.closest("[data-howto-role]");
+        if (rLi) { e.preventDefault(); e.stopPropagation(); role = rLi.dataset.howtoRole; refresh(); return; }
+        const pLi = e.target.closest("[data-howto]");
+        if (pLi) { e.preventDefault(); e.stopPropagation(); idx = Number(pLi.dataset.howto); refresh(); }
       });
-      node.querySelector("#copy-prompt").onclick = async (e) => {
-        e.target.textContent = (await copyText(ta.value)) ? "Скопировано" : "Не удалось";
+      copyBtn.onclick = async () => {
+        copyBtn.textContent = (await copyText(ta.value)) ? "Скопировано ✓" : "Не удалось";
       };
-    });
+    }, { wide: true });
   },
   async pair() {
     const p = await api("/api/pairing");
