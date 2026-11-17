@@ -168,7 +168,9 @@ function todoStatus(t) {
   if (t.routing) return `отправляю → «${esc(t.routing.name)}»…`;
   if (t.kind === "forward") {
     if (t.delivery_target && t.delivery_target !== data?.device_id) {
-      return t.delivered_at ? "доставлено на другой ПК · ожидает получения" : "ожидает доставки";
+      const targetPeer = (data?.link?.peers || []).find((p) => p.id === t.delivery_target);
+      if (t.delivered_at) return "доставлено на другой ПК · ожидает получения (нет ACK)";
+      return targetPeer?.online === false ? "компьютер не в сети · ожидает доставки" : "ожидает доставки";
     }
     if (t.forwarded_at) return "переслано · ожидает получения";
     return "<b>не переслано</b>";
@@ -1182,10 +1184,18 @@ function peersLive(canPair) {
   const box = (key, title, rows) => `<fieldset class="peer-box" data-key="${key}"><legend>${title}</legend>${rows}</fieldset>`;
   const agentsOf = (p) => [...new Set(Object.values(p.agents || {}).flat())];
   const state = (p) => {
-    if (p.online === null) return "проверяю связь…";
-    if (!p.online) return `<span class="bad">не в сети</span>${p.error ? ` <span class="sub">(${esc(p.error)})</span>` : ""}`;
-    const n = agentsOf(p).length;
-    return `<span class="ok">в сети</span>${n ? `, агентов: ${n}` : ""}`;
+    const parts = [];
+    if (p.online === null) parts.push("проверяю связь…");
+    else if (!p.online) parts.push(`<span class="bad">не в сети</span>${p.error ? ` <span class="sub">(${esc(p.error)})</span>` : ""}`);
+    else {
+      const n = agentsOf(p).length;
+      parts.push(`<span class="ok">в сети</span>${n ? `, агентов: ${n}` : ""}`);
+    }
+    if (p.last_connected_at || p.synced) parts.push(`связь: ${esc(ago(p.last_connected_at || p.synced))}`);
+    if (p.pending_events) parts.push(`в очереди: ${esc(p.pending_events)}`);
+    if (p.compat_reason) parts.push(`<span class="bad">${esc(p.compat_reason)}</span>`);
+    if (Array.isArray(p.conflicts) && p.conflicts.length) parts.push(`<span class="bad">конфликт: ${esc(p.conflicts.at(-1).reason)}</span>`);
+    return parts.join(" · ");
   };
   const out = [];
   if (!link.lan) {
@@ -1205,7 +1215,7 @@ function peersLive(canPair) {
   out.push(box("peers", "Подключённые компьютеры", peers.length
     ? peers.map((p) => row(`p:${p.id}`, p.online === false ? "msg_warning-2" : "network_normal_two_pcs-1",
       `<b>«${esc(p.name)}»</b> <span class="sub">${esc(String(p.base || "").replace("http://", ""))}</span><br><span title="${esc(agentsOf(p).join(", "))}">${state(p)}</span>`,
-      btn("remove", "Отключить", p.id))).join("")
+      btn("sync", "Сверить", p.id) + btn("remove", "Отключить", p.id))).join("")
     : '<p class="sub" data-key="none">Пока нет. Запустите Agent Desk на другом компьютере этой Wi-Fi сети и подключите его здесь.</p>'));
   if (canPair && link.lan) {
     const near = link.nearby || [];

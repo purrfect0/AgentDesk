@@ -59,13 +59,17 @@ class SyncJournal {
     const j = s.sync;
     j.id ??= crypto.randomUUID();
     j.clock = Number.isSafeInteger(j.clock) ? j.clock : 0;
+    j.base_seq = Number.isSafeInteger(j.base_seq) && j.base_seq >= 0 ? j.base_seq : 0;
+    j.baseline = Array.isArray(j.baseline) ? j.baseline : [];
     j.events = Array.isArray(j.events) ? j.events : [];
-    for (const k of ["applied", "versions", "hashes", "cursors", "sent", "errors", "peer_journals"]) j[k] ??= {};
+    for (const k of ["applied", "versions", "hashes", "cursors", "sent", "sent_replay", "errors", "peer_journals", "conflicts", "recoveries"]) j[k] ??= {};
     // The journal is deliberately not trimmed with the UI event log: replay/dedup survives closure.
+    for (const ev of j.baseline) j.applied[ev.id] = digest(ev);
     for (const ev of j.events) j.applied[ev.id] = digest(ev);
     s.remote_agents ??= {}; s.tasks ??= {}; s.bindings ??= {};
   }
   get journal() { return this.desk.state.sync; }
+  totalSeq() { return (this.journal.base_seq || 0) + this.journal.events.length; }
   entities() {
     const s = this.desk.state, out = new Map();
     for (const t of s.todos) {
@@ -98,6 +102,39 @@ class SyncJournal {
       const ev = { id: crypto.randomUUID(), origin: this.desk.config.device_id, clock: ++j.clock, type, entity_id, data: null, deleted: true, time: new Date().toISOString() };
       j.events.push(ev); j.applied[ev.id] = digest(ev); j.versions[key] = version(ev); delete j.hashes[key];
     }
+    if (j.events.length > 2000) this.compact(2000, 600);
+  }
+  compact(maxEvents = 1200, keepTail = 400) {
+    const j = this.journal;
+    j.base_seq ??= 0;
+    j.baseline ??= [];
+    if (!Number.isSafeInteger(maxEvents) || maxEvents < 1 || !Number.isSafeInteger(keepTail) || keepTail < 0) {
+      throw error("неверные параметры сжатия журнала");
+    }
+    if (j.events.length <= maxEvents) {
+      return { compacted: 0, base_seq: j.base_seq, baseline_entities: j.baseline.length, tail_events: j.events.length };
+    }
+    const cut = Math.max(0, j.events.length - keepTail);
+    const dropped = j.events.slice(0, cut);
+    j.events = j.events.slice(cut);
+    j.base_seq += cut;
+    const latestByEntity = new Map();
+    for (const ev of [...j.baseline, ...dropped]) {
+      const k = `${ev.type}:${ev.entity_id}`;
+      latestByEntity.delete(k); // preserve chronological order of latest versions
+      latestByEntity.set(k, ev);
+    }
+    j.baseline = [...latestByEntity.values()];
+    const appliedKeys = Object.keys(j.applied);
+    if (appliedKeys.length > 5000) {
+      const pinnedIds = new Set([...j.baseline.map((e) => e.id), ...j.events.map((e) => e.id)]);
+      const recent = appliedKeys.slice(-5000);
+      const nextApplied = {};
+      for (const id of pinnedIds) if (j.applied[id]) nextApplied[id] = j.applied[id];
+      for (const id of recent) if (j.applied[id]) nextApplied[id] = j.applied[id];
+      j.applied = nextApplied;
+    }
+    return { compacted: cut, base_seq: j.base_seq, baseline_entities: j.baseline.length, tail_events: j.events.length };
   }
   validate(ev) {
     if (!ev || !UUID.test(ev.id) || !DEVICE.test(ev.origin) || !UUID.test(ev.entity_id) || !TYPES.has(ev.type)
@@ -236,6 +273,38 @@ class SyncJournal {
       events.push(ev); bytes += size;
     }
     return { events, cursor: offset + events.length, more: offset + events.length < this.journal.events.length };
+  }
+  peerPage(cursor = 0, replayOffset = null) {
+    const j = this.journal;
+    const baseSeq = j.base_seq || 0;
+    const total = baseSeq + j.events.length;
+    const inRange = replayOffset === null
+      && Number.isSafeInteger(cursor)
+      && (cursor === 0 ? baseSeq === 0 : (cursor >= baseSeq && cursor <= total));
+    if (inRange) {
+      const localOffset = cursor - baseSeq;
+      const p = this.page(localOffset);
+      return { events: p.events, cursor: baseSeq + p.cursor, more: p.more, replay: false, replay_offset: null };
+    }
+    // Controlled snapshot/replay recovery when peer is new on a compacted journal or cursor fell outside range.
+    const stream = [...(j.baseline || []), ...j.events];
+    const start = Number.isSafeInteger(replayOffset) && replayOffset >= 0 && replayOffset <= stream.length ? replayOffset : 0;
+    const events = []; let bytes = 0;
+    for (const ev of stream.slice(start, start + 20)) {
+      const size = Buffer.byteLength(JSON.stringify(ev));
+      if (events.length && bytes + size > 140000) break;
+      if (size > 60000) throw error("локальное событие превышает лимит", 413);
+      events.push(ev); bytes += size;
+    }
+    const nextOffset = start + events.length;
+    const done = nextOffset >= stream.length;
+    return {
+      events,
+      cursor: done ? total : 0,
+      more: !done,
+      replay: true,
+      replay_offset: done ? null : nextOffset,
+    };
   }
 }
 module.exports = { SyncJournal, stableId, UUID, seal, unseal };

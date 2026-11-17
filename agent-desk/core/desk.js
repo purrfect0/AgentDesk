@@ -76,6 +76,13 @@ function writeJsonAtomic(file, data, pretty = false) {
   } finally {
     fs.closeSync(fd);
   }
+  try {
+    if (fs.existsSync(file) && fs.statSync(file).size > 2) {
+      const bakTmp = `${file}.bak.${process.pid}.tmp`;
+      fs.copyFileSync(file, bakTmp);
+      fs.renameSync(bakTmp, `${file}.bak`);
+    }
+  } catch { /* best-effort backup before atomic swap */ }
   let error;
   for (let i = 0; i < 6; i++) {
     try {
@@ -93,7 +100,8 @@ function writeJsonAtomic(file, data, pretty = false) {
 
 /**
  * Read a JSON object. A damaged file is never silently replaced: it is renamed to
- * `<name>.corrupt-<time>` (when quarantine is on) and a warning is shown in the UI.
+ * `<name>.corrupt-<time>` (when quarantine is on), restored from `<name>.bak` if available,
+ * and a warning is shown in the UI.
  */
 function loadJson(file, warnings, label, quarantine = true) {
   let text;
@@ -115,6 +123,16 @@ function loadJson(file, warnings, label, quarantine = true) {
         fs.renameSync(file, bad);
         kept = `; файл сохранён как ${path.basename(bad)}`;
       } catch { /* leave it in place */ }
+    }
+    const bak = `${file}.bak`;
+    if (quarantine && fs.existsSync(bak)) {
+      try {
+        const bakVal = JSON.parse(fs.readFileSync(bak, "utf8").replace(/^\uFEFF/, ""));
+        if (bakVal && typeof bakVal === "object" && !Array.isArray(bakVal)) {
+          warnings.push({ time: nowIso(), level: "error", text: `${label} повреждён (${e.message})${kept}. Данные восстановлены из резервной копии ${path.basename(bak)}.` });
+          return bakVal;
+        }
+      } catch { /* backup also unreadable: fall through to defaults */ }
     }
     warnings.push({ time: nowIso(), level: "error", text: `${label} повреждён (${e.message})${kept}. Загружены значения по умолчанию.` });
     return null;
@@ -964,6 +982,76 @@ class Desk extends EventEmitter {
     };
   }
 
+  reconcileReport() {
+    const s = this.state;
+    const j = s.sync || {};
+    const tasks = Object.values(s.tasks || {})
+      .sort((a, b) => a.task_id.localeCompare(b.task_id))
+      .map((t) => {
+        const receipts = s.todos
+          .filter((r) => r.task_id === t.task_id)
+          .sort((a, b) => a.message_id.localeCompare(b.message_id))
+          .map((r) => ({
+            message_id: r.message_id,
+            display_id: r.display_id,
+            purpose: r.purpose || r.kind,
+            delivered_at: r.delivered_at || null,
+            forwarded_at: r.forwarded_at || null,
+            acked_at: r.acked_at || null,
+            done_at: r.done_at || null,
+            superseded_by: r.superseded_by || null,
+          }));
+        return {
+          task_id: t.task_id,
+          card_id: s.task_card_ids?.[t.task_id] || null,
+          project: t.project,
+          project_id: t.project_id,
+          coordinator_device_id: t.coordinator_device_id,
+          coordinator_epoch: t.coordinator_epoch || 1,
+          epoch: t.assignment?.epoch || 1,
+          assignee: t.assignment?.agent || "",
+          assignee_device_id: t.assignment?.device_id || "",
+          assignee_session_id: t.assignment?.session_id || "",
+          state: t.state,
+          assignment_message_id: t.assignment_message_id || null,
+          receipts,
+        };
+      });
+    const todos = [...s.todos]
+      .sort((a, b) => a.message_id.localeCompare(b.message_id))
+      .map((r) => ({
+        message_id: r.message_id,
+        display_id: r.display_id,
+        task_id: r.task_id || null,
+        origin_device_id: r.origin_device_id,
+        delivered_at: r.delivered_at || null,
+        forwarded_at: r.forwarded_at || null,
+        acked_at: r.acked_at || null,
+        done_at: r.done_at || null,
+        supersedes: r.supersedes || null,
+        superseded_by: r.superseded_by || null,
+      }));
+    return {
+      generated_at: nowIso(),
+      device_id: this.config.device_id,
+      journal: {
+        id: j.id || null,
+        clock: j.clock || 0,
+        base_seq: j.base_seq || 0,
+        baseline_entities: j.baseline?.length || 0,
+        tail_events: j.events?.length || 0,
+      },
+      totals: {
+        tasks: tasks.length,
+        todos: todos.length,
+        delivered_todos: todos.filter((r) => r.delivered_at).length,
+        acked_todos: todos.filter((r) => r.acked_at).length,
+      },
+      tasks,
+      todos,
+    };
+  }
+
   pairing() {
     const key = this.config.key;
     const urls = lanIps().map((ip) => `http://${ip}:${this.boundPort}/?key=${key}`);
@@ -1131,6 +1219,9 @@ class Desk extends EventEmitter {
       if (url.pathname === "/api/tasks/context") {
         try { return this._send(res, 200, this.tasks.context(this._resolveTaskId(url.searchParams.get("id"))), cors); }
         catch (e) { return this._send(res, e.status || 400, { error: e.message }, cors); }
+      }
+      if (url.pathname === "/api/reconcile") {
+        return auth.local ? this._send(res, 200, this.reconcileReport(), cors) : this._send(res, 403, { error: "только на ПК" }, cors);
       }
       if (url.pathname === "/api/pairing") {
         return auth.local ? this._send(res, 200, this.pairing(), cors) : this._send(res, 403, { error: "только на ПК" }, cors);
@@ -1314,6 +1405,7 @@ class Desk extends EventEmitter {
     const s = this.state;
     const parts = pathname.split("/").filter(Boolean);
     if (parts.length === 4 && parts[0] === "api" && parts[1] === "todo") {
+      const before = JSON.parse(JSON.stringify(this.state));
       const t = s.todos.find((x) => String(x.id) === parts[2]);
       if (!t) return { code: 404, body: { error: "not found" } };
       const now = nowIso();
@@ -1330,17 +1422,26 @@ class Desk extends EventEmitter {
       }
       t.auto = false;
       t.updated = now;
-      this._commit();
+      try {
+        this._saveState();
+      } catch (e) {
+        this.state = before;
+        return { code: 500, body: { error: `не удалось сохранить состояние: ${e.message}` } };
+      }
+      this.emit("change");
       return {};
     }
     switch (pathname) {
       case "/api/ui/show":
         this.emit("show", { todo: body.todo ?? null, project: body.project ?? null });
         return {};
-      case "/api/agent/forget":
+      case "/api/agent/forget": {
+        const before = JSON.parse(JSON.stringify(this.state));
         delete s.agents[`${oneLine(body.project, 60)}/${oneLine(body.agent, 60)}`];
-        this._commit();
+        try { this._saveState(); } catch (e) { this.state = before; return { code: 500, body: { error: `не удалось сохранить состояние: ${e.message}` } }; }
+        this.emit("change");
         return {};
+      }
       case "/api/config":
         return this._updateConfig(body, auth);
       case "/api/pairing/rotate":
@@ -1349,10 +1450,13 @@ class Desk extends EventEmitter {
         this._saveConfig();
         this._bump();
         return { body: this.pairing() };
-      case "/api/rejected/clear":
+      case "/api/rejected/clear": {
+        const before = JSON.parse(JSON.stringify(this.state));
         s.rejected = [];
-        this._commit();
+        try { this._saveState(); } catch (e) { this.state = before; return { code: 500, body: { error: `не удалось сохранить состояние: ${e.message}` } }; }
+        this.emit("change");
         return {};
+      }
       case "/api/warnings/dismiss":
         this.warnings = [];
         this._bump();

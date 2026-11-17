@@ -132,6 +132,7 @@ class PeerLink {
     this.requests = new Map(); // id -> {id, name, ip, base, key, code, time}: they ask to pair
     this.outgoing = new Map(); // key -> {key, code, base, id, name, time}: we asked them
     this.status = new Map(); // peer id -> {online, agents, error, checked}
+    this.conflicts = new Map(); // peer id -> [{time, status, reason}]
     this.queue = desk.state.todos.filter(t => t.routing && !t.done_at).map(t => t.id); // recover pending auto-send after restart
     this.socket = null;
     this.timer = null;
@@ -460,16 +461,45 @@ class PeerLink {
     if (!p) throw fail("компьютер не подключён");
     try {
       if (this.desk.fileSyncEnabled) { this.desk.mail.scan(); this.desk._saveState(); }
-      for (let batch = 0; batch < 5; batch++) {
+      for (let batch = 0; batch < 50; batch++) {
         const j = this.desk.sync.journal;
         j.mail_cursors ??= {};
-        const page = this.desk.sync.page(j.sent[p.id] || 0);
-        const r = await this.secure(p, { action: "events", cursor: j.cursors[p.id] || 0, journal: j.peer_journals[p.id], events: page.events, mail_cursor: this.desk.fileSyncEnabled ? (j.mail_cursors[p.id] || 0) : 0 });
+        j.sent_replay ??= {};
+        j.cursors_replay ??= {};
+        j.recoveries ??= {};
+        const page = this.desk.sync.peerPage(j.sent[p.id] || 0, j.sent_replay[p.id] ?? null);
+        const r = await this.secure(p, {
+          action: "events",
+          cursor: j.cursors[p.id] || 0,
+          replay_offset: j.cursors_replay[p.id] ?? null,
+          journal: j.peer_journals[p.id],
+          events: page.events,
+          mail_cursor: this.desk.fileSyncEnabled ? (j.mail_cursors[p.id] || 0) : 0,
+        });
         if (!Array.isArray(r.receipts) || page.events.some(ev => !r.receipts.includes(ev.id))) throw fail("нет долговечной квитанции по всем событиям");
         this.desk.sync.receive(r.events || []);
         const current = this.desk.sync.journal;
+        current.sent_replay ??= {};
+        current.cursors_replay ??= {};
+        current.recoveries ??= {};
         const reset = current.peer_journals[p.id] && current.peer_journals[p.id] !== r.journal;
-        current.sent[p.id] = reset ? 0 : page.cursor; current.cursors[p.id] = r.cursor;
+        if (reset) {
+          current.sent[p.id] = 0;
+          delete current.sent_replay[p.id];
+        } else if (page.replay && page.replay_offset !== null) {
+          current.sent_replay[p.id] = page.replay_offset;
+        } else {
+          current.sent[p.id] = page.cursor;
+          delete current.sent_replay[p.id];
+        }
+        if (r.replay && r.replay_offset !== null && r.replay_offset !== undefined) {
+          current.cursors_replay[p.id] = r.replay_offset;
+          current.recoveries[p.id] = { at: nowIso(), mode: "snapshot_replay_in_progress" };
+        } else {
+          current.cursors[p.id] = r.cursor;
+          delete current.cursors_replay[p.id];
+          if (r.replay || page.replay) current.recoveries[p.id] = { at: nowIso(), mode: "snapshot_replay_completed" };
+        }
         current.peer_journals[p.id] = r.journal;
         current.mail_cursors ??= {}; current.mail_cursors[p.id] = this.desk.fileSyncEnabled ? (r.mail_cursor || 0) : 0;
         for (const ev of page.events) if (ev.type === "todo" && !ev.deleted) {
@@ -477,19 +507,40 @@ class PeerLink {
           if (t && !t.delivered_at) t.delivered_at = nowIso();
         }
         this.desk._saveState();
+        const now = nowIso();
         const old = this.status.get(p.id) || {};
-        this.status.set(p.id, { ...old, online: true, agents: cleanAgents(r.agents), error: "", checked: nowIso(), synced: nowIso(), protocol: 3, mail: r.mail_status || null });
+        const compatReason = r.protocol && r.protocol < 3 ? "Узел использует старый протокол: обновите Agent Desk до актуальной версии" : "";
+        this.status.set(p.id, { ...old, online: true, agents: cleanAgents(r.agents), error: "", compat_reason: compatReason, checked: now, synced: now, last_connected_at: now, protocol: r.protocol || 3, mail: r.mail_status || null });
         await this.syncMail(p, r.mail || []);
         if (!reset && !page.more && !r.more && (!this.desk.fileSyncEnabled || !r.mail_more)) break;
       }
       delete this.desk.sync.journal.errors[p.id]; this._changed();
       return { ok: true, synced: this.status.get(p.id)?.synced };
     } catch (e) {
-      const text = e.status === 404 ? "для синхронизации карточек обновите AgentDesk на этом компьютере до 2.3.0" : e.message;
+      const isOldPeer = e.status === 404;
+      const text = isOldPeer ? "для синхронизации карточек обновите AgentDesk на этом компьютере до 2.3.0" : e.message;
       this.desk.sync.journal.errors[p.id] = text;
+      if (e.status === 409 || e.status === 403) this._recordConflict(p.id, e.status, text);
       const old = this.status.get(p.id) || {};
-      this.status.set(p.id, { ...old, error: text, checked: nowIso(), online: e.status ? true : false });
+      this.status.set(p.id, {
+        ...old,
+        error: text,
+        compat_reason: isOldPeer ? text : (old.compat_reason || ""),
+        checked: nowIso(),
+        online: e.status ? true : false,
+      });
       this._changed(); throw e;
+    }
+  }
+
+  _recordConflict(peerId, status, reason) {
+    const row = { time: nowIso(), status: status || 409, reason: String(reason || "конфликт синхронизации").slice(0, 240) };
+    const prev = this.conflicts.get(peerId) || [];
+    this.conflicts.set(peerId, [...prev, row].slice(-10));
+    if (this.desk.state?.sync) {
+      this.desk.state.sync.conflicts ??= {};
+      const persisted = Array.isArray(this.desk.state.sync.conflicts[peerId]) ? this.desk.state.sync.conflicts[peerId] : [];
+      this.desk.state.sync.conflicts[peerId] = [...persisted, row].slice(-10);
     }
   }
 
@@ -534,8 +585,15 @@ class PeerLink {
     if (value.action === "info") {
       result = { id: this.config.device_id, name: this.name, agents: this.desk.agentDirectory(), protocol: 3, mail_status: this.desk.mailDiagnostics() };
     } else if (value.action === "events") {
-      const receipts = this.desk.sync.receive(value.events || []);
-      const page = this.desk.sync.page(value.journal === this.desk.sync.journal.id ? (value.cursor || 0) : 0);
+      let receipts;
+      try {
+        receipts = this.desk.sync.receive(value.events || []);
+      } catch (e) {
+        if (e.status === 409 || e.status === 403) this._recordConflict(p.id, e.status, e.message);
+        throw e;
+      }
+      const sameJournal = value.journal === this.desk.sync.journal.id;
+      const page = this.desk.sync.peerPage(sameJournal ? (value.cursor || 0) : 0, sameJournal ? (value.replay_offset ?? null) : null);
       const all = this.desk.fileSyncEnabled ? this.desk.mail.manifest() : [];
       const start = Number.isSafeInteger(value.mail_cursor) && value.mail_cursor >= 0 && value.mail_cursor < all.length ? value.mail_cursor : 0;
       const mail = []; let mailBytes = 0;
@@ -545,7 +603,7 @@ class PeerLink {
         mail.push(item); mailBytes += bytes;
       }
       const next = start + mail.length;
-      result = { ...page, journal: this.desk.sync.journal.id, receipts, mail, mail_cursor: next < all.length ? next : 0, mail_more: next < all.length,
+      result = { ...page, journal: this.desk.sync.journal.id, protocol: 3, receipts, mail, mail_cursor: next < all.length ? next : 0, mail_more: next < all.length,
         id: this.config.device_id, name: this.name, agents: this.desk.agentDirectory(), mail_status: this.desk.mailDiagnostics() };
       this.desk._saveState();
     } else if (value.action === "mail-chunk") {
@@ -622,27 +680,68 @@ class PeerLink {
           const ids = (Array.isArray(body.todos) ? body.todos : []).map(Number).filter(Number.isInteger).slice(0, MAX.items);
           return { body: await this.send(String(body.peer || ""), ids) };
         }
+        case "sync": {
+          const targetId = String(body.id || body.peer || "");
+          if (targetId) return { body: await this.sync(targetId) };
+          const synced = [];
+          for (const peer of this.config.peers) synced.push({ id: peer.id, ...(await this.sync(peer.id)) });
+          return { body: { ok: true, peers: synced } };
+        }
         default:
           return { code: 404, body: { error: "not found" } };
       }
     } catch (e) {
-      return { code: e.user ? 400 : 500, body: { error: e.message } };
+      return { code: e.status || (e.user ? 400 : 500), body: { error: e.message } };
     }
   }
 
   /** For the UI (no keys): this device, paired desks, desks nearby, open requests. */
   payload() {
     const c = this.config;
+    const j = this.desk.state.sync || {};
+    const totalSeq = (j.base_seq || 0) + (j.events?.length || 0);
     return {
       id: c.device_id,
       name: this.name,
       lan: this.desk.lanEnabled,
       discovery: !!this.socket,
       auto: c.peer_auto,
-      sync: { enabled: true, protocol: 3, events: this.desk.state.sync?.events?.length || 0, errors: this.desk.state.sync?.errors || {} },
+      sync: {
+        enabled: true,
+        protocol: 3,
+        events: j.events?.length || 0,
+        base_seq: j.base_seq || 0,
+        baseline_entities: j.baseline?.length || 0,
+        errors: j.errors || {},
+        recoveries: j.recoveries || {},
+      },
       peers: c.peers.map((p) => {
         const s = this.status.get(p.id) || {};
-        return { id: p.id, name: p.name, base: p.base, online: s.online ?? null, error: s.error || "", agents: s.agents || {}, checked: s.checked || null, synced: s.synced || null, protocol: s.protocol || null, mail: s.mail || null };
+        const sent = Number.isSafeInteger(j.sent?.[p.id]) ? j.sent[p.id] : 0;
+        const queuedTodos = this.queue.filter((todoId) => {
+          const t = this.desk.state.todos?.find((row) => row.id === todoId);
+          return t && !t.done_at && t.routing?.id === p.id;
+        }).length;
+        const pendingEvents = Math.max(0, totalSeq - sent) + queuedTodos;
+        const memConflicts = this.conflicts.get(p.id) || [];
+        const savedConflicts = Array.isArray(j.conflicts?.[p.id]) ? j.conflicts[p.id] : [];
+        const mergedConflicts = [...savedConflicts, ...memConflicts.filter((m) => !savedConflicts.some((sv) => sv.time === m.time && sv.reason === m.reason))].slice(-5);
+        return {
+          id: p.id,
+          name: p.name,
+          base: p.base,
+          online: s.online ?? null,
+          error: s.error || "",
+          compat_reason: s.compat_reason || "",
+          agents: s.agents || {},
+          checked: s.checked || null,
+          synced: s.synced || null,
+          last_connected_at: s.last_connected_at || s.synced || (s.online ? s.checked : null),
+          pending_events: pendingEvents,
+          conflicts: mergedConflicts,
+          protocol: s.protocol || null,
+          mail: s.mail || null,
+        };
       }),
       nearby: [...this.nearby.values()].filter((n) => !this.peer(n.id)).map(({ id, name, ip, port }) => ({ id, name, ip, port })),
       requests: [...this.requests.values()].map(({ id, name, ip, code, time }) => ({ id, name, ip, code, time })),
