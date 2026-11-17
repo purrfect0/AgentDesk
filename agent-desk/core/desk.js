@@ -14,7 +14,7 @@ const { SyncJournal, stableId, UUID } = require("./sync.js");
 const { classifyRuntimeRejection, MARKER_TEMPLATES } = require("./marker-schema.js");
 const { AdapterRegistry } = require("./adapters.js");
 
-const VERSION = "2.3.3"; // the app version, the same as in package.json (a test checks it)
+const VERSION = "2.3.4"; // the app version, the same as in package.json (a test checks it)
 const PROTOCOL = 3;
 const STATES = new Set(["working", "waiting", "done", "blocked", "idle"]);
 const WAITING_FOR = new Set([
