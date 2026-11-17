@@ -66,6 +66,9 @@ let taskFilter = "all";
 let taskSearch = "";
 let taskRenderLimit = 60;
 const promptDrafts = new Map();
+const todoHasCopyableText = (t) => Boolean(t && (t.message || t.has_message));
+let serverSearchState = { q: "", todoIds: null, taskIds: null };
+let searchAbort = null;
 function utf8Bytes(str) {
   const s = String(str ?? "");
   if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(s).length;
@@ -390,7 +393,7 @@ function applySelection() {
     const on = selected && (selected.type === "todo" ? tr.dataset.todo === String(selected.id) : tr.dataset.agent === selected.id);
     tr.classList.toggle("highlighted", !!on);
   });
-  $("#tb-copy").disabled = !todo?.message || !!todo.superseded_by;
+  $("#tb-copy").disabled = !todoHasCopyableText(todo) || !!todo?.superseded_by;
   $("#tb-forwarded").disabled = !(online && isForwardPending(todo) && !todo.forwarded_at && !todo.acked_at);
   $("#tb-done").disabled = !(online && todo && !todo.done_at);
   const peers = data.link?.peers || [];
@@ -420,6 +423,7 @@ function matchesSearch(query, values) {
 }
 function todoMatches(t) {
   if (todoSearch.trim()) {
+    if (data?.compact && serverSearchState.q === todoSearch.trim() && serverSearchState.todoIds?.has(t.id)) return true;
     const task = currentTask(t.task_id);
     const devId = t.recipient_device_id || t.origin_device_id || t.from_device?.id || "";
     return matchesSearch(todoSearch, [
@@ -428,7 +432,7 @@ function todoMatches(t) {
       t.task, t.project, t.agent, ...agentAliasesFor(t.project, t.agent),
       t.to, ...agentAliasesFor(t.project, t.to),
       devId, devId && deviceLabel(devId), t.from_device?.name,
-      t.kind, todoStatus(t).replace(/<[^>]*>/g, " "), t.note, t.result, t.message,
+      t.kind, todoStatus(t).replace(/<[^>]*>/g, " "), t.note, t.result, t.message ?? t.message_preview,
     ]);
   }
   if (!inProject(t)) return false;
@@ -529,7 +533,7 @@ function renderTodos() {
 function renderTodoMenu(todo) {
   const menu = $("#todo-context-menu");
   const copy = menu.querySelector('[data-action="copy-message"]');
-  copy.disabled = !todo.message || !!todo.superseded_by;
+  copy.disabled = !todoHasCopyableText(todo) || !!todo.superseded_by;
   copy.querySelector("span").textContent = todo.forwarded_at || todo.acked_at || todo.done_at
     ? "Переслать снова (копировать)"
     : todo.kind === "forward" && todo.purpose === "assignment"
@@ -573,7 +577,7 @@ async function copySelectedTodo(e) {
   const selection = document.getSelection?.();
   if (selection && !selection.isCollapsed) return;
   const todo = resolveSelectedTodo();
-  if (!todo?.message || todo.superseded_by || !todoMatches(todo)) return;
+  if (!todoHasCopyableText(todo) || todo.superseded_by || !todoMatches(todo)) return;
   e.preventDefault();
   closeTodoMenu(true);
   await ACTIONS["copy-message"]();
@@ -627,9 +631,45 @@ function receiptsMarkup(t) {
 function assignmentMessage(t) {
   return (data?.todos || []).find(r => r.message_id === t.assignment_message_id && !r.superseded_by && r.assignment_epoch === taskEpoch(t));
 }
+async function ensureFullTodo(todo) {
+  if (!todo || todo.message !== undefined || !todo.has_message || !online) return todo;
+  const r = await api(`/api/item?todo=${encodeURIComponent(todo.id)}`);
+  if (r?.todo) Object.assign(todo, r.todo);
+  return todo;
+}
+async function ensureFullTask(task) {
+  if (!task || !online) return task;
+  const needPrompt = task.has_prompt && task.prompt === undefined;
+  const needHistory = task.history_count && (task.history || []).length < task.history_count;
+  if (!needPrompt && !needHistory) return task;
+  const r = await api(`/api/item?task=${encodeURIComponent(task.task_id)}`);
+  if (r?.task) Object.assign(task, r.task);
+  return task;
+}
+function scheduleServerSearch(rawQuery, onReady) {
+  const q = String(rawQuery || "").trim();
+  if (searchAbort) { searchAbort.abort(); searchAbort = null; }
+  if (!q || !data?.compact || !online) {
+    if (!q) serverSearchState = { q: "", todoIds: null, taskIds: null };
+    return;
+  }
+  const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  searchAbort = ctrl;
+  (async () => {
+    try {
+      const r = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      if (ctrl?.signal?.aborted) return;
+      serverSearchState = { q, todoIds: new Set(r.todo_ids || []), taskIds: new Set(r.task_ids || []) };
+      onReady?.();
+    } catch { /* offline or cancelled */ }
+  })();
+}
 async function copyTaskPrompt(t, button) {
   const message = assignmentMessage(t);
-  if (message) return copyPromptText(forwardText(message), button, t.assignment?.agent);
+  if (message) {
+    try { await ensureFullTodo(message); } catch (error) { alertBox("Копирование задания", error.message, "msg_warning-2"); return false; }
+    return copyPromptText(forwardText(message), button, t.assignment?.agent);
+  }
   try {
     const context = await api(`/api/tasks/context?id=${encodeURIComponent(t.task_id)}`);
     if (typeof context.text !== "string" || !context.text.trim()) throw new Error("Текст задания отсутствует");
@@ -668,7 +708,13 @@ function artifactAvailabilityBadge(a) {
 function boundAgentForTask(t) {
   const a = t?.assignment;
   if (!a?.agent) return null;
-  return Object.values(data?.agents || {}).find((ag) => ag.project === t.project && ag.agent === a.agent && (!a.device_id || (ag.device_id || data?.device_id) === a.device_id)) || null;
+  return Object.values(data?.agents || {}).find((ag) => {
+    if (ag.project !== t.project || ag.agent !== a.agent) return false;
+    if (a.device_id && (ag.device_id || data?.device_id) !== a.device_id) return false;
+    const agSess = ag.session_id || ag.session || "";
+    if (a.session_id && agSess && agSess !== a.session_id) return false; // fresh session never inherits old session's state
+    return true;
+  }) || null;
 }
 function taskLastSignal(t) {
   const ag = boundAgentForTask(t);
@@ -734,7 +780,7 @@ function releaseResourceDialog(agentItem) {
 function taskMatches(t) {
   const q = taskSearch.trim();
   const messages = taskReceiptRows(t);
-  if (q && !matchesSearch(q, [
+  if (q && !(data?.compact && serverSearchState.q === q && serverSearchState.taskIds?.has(t.task_id)) && !matchesSearch(q, [
     taskCardNumber(t), t.task_id, t.project_id, t.assignment_message_id,
     t.title, t.task, t.project,
     t.assignment?.agent, ...agentAliasesFor(t.project, t.assignment?.agent),
@@ -742,8 +788,8 @@ function taskMatches(t) {
     t.coordinator_device_id, deviceLabel(t.coordinator_device_id),
     t.state, TASK_LABEL[t.state], t.status_reason,
     t.checkpoint?.branch, t.checkpoint?.commit, t.checkpoint?.report, t.checkpoint?.next_step,
-    t.prompt,
-    ...messages.flatMap((r) => [r.display_id, r.message_id, r.to, r.message]),
+    t.prompt ?? t.prompt_preview,
+    ...messages.flatMap((r) => [r.display_id, r.message_id, r.to, r.message ?? r.message_preview]),
   ])) return false;
   if (taskFilter === "active") return isTaskActiveUi(t);
   if (taskFilter === "submitted") return t.state === "submitted";
@@ -799,13 +845,16 @@ function taskDetails(t) {
   const kvList = (k, items) => Array.isArray(items) && items.length ? `<dt>${esc(k)}</dt><dd><ul class="kv-list">${items.map(s => `<li>${esc(typeof s === "string" ? s : (s?.name ? `${s.name} (${s.path})` : s?.path || JSON.stringify(s)))}</li>`).join("")}</ul></dd>` : "";
   const originLabel = { managed: "явное назначение", observed: "наблюдаемый маркер", migrated: "исторический импорт" }[taskOriginKind(t)] || "";
   const cpRows = [kv("Репозиторий", cp.repo), kv("Ветка", cp.branch), kv("Коммит", cp.commit), kv("Отчёт", cp.report), kv("Следующий шаг", cp.next_step), kvList("Ограничения", cp.constraints), kvList("Выбранные skills", cp.skills), kvList("Манифест", cp.manifest)].join("");
-  const promptBlock = t.prompt ? '<h3>Промпт задания</h3><div id="task-prompt-body" class="msg-body"></div>' : "";
+  const promptBlock = (t.prompt || t.has_prompt) ? '<h3>Промпт задания</h3><div id="task-prompt-body" class="msg-body"></div>' : "";
   const history = (t.history || []).slice(-12).reverse();
   dialog("Задача — подробности", `<h2 class="task-title"><code>${esc(taskCardNumber(t))}</code> — ${esc(t.title || t.task)}</h2><dl class="kv">${kv("Карточка", taskCardNumber(t))}${kv("Состояние", TASK_LABEL[t.state] || t.state)}${kv("Источник", originLabel)}${kv("Причина статуса", t.status_reason)}${kv("Исполнитель", t.assignment?.agent)}${kv("Компьютер", deviceLabel(t.assignment?.device_id))}${kv("Сессия", sessionLabel(t))}${kv("Последний сигнал", taskLastSignal(t))}${kv("Проверяет", taskReviewerLabel(t))}${kv("Ведущий", deviceLabel(t.coordinator_device_id))}${cpRows}</dl>
     ${technicalDetails(t)}${promptBlock}<h3>Артефакты</h3>${listValues(t.artifacts).length ? `<ul class="receipt-list">${listValues(t.artifacts).map((a) => `<li><code>${esc(a.path)}</code> · ${artifactAvailabilityBadge(a)}<br><code class="sub" title="${esc(a.hash || a.sha256 || "")}">SHA-256: ${esc((a.hash || a.sha256 || "не указан").slice(0, 16))}${(a.hash || a.sha256) ? "…" : ""}</code></li>`).join("")}</ul>` : "<p>Артефактов пока нет.</p>"}
     <h3>История задачи</h3><ul class="receipt-list">${history.map((h) => `<li>${esc(h.time ? `${hhmm(h.time)} · ${ago(h.time)}` : (h.at || ""))} · ${esc(TASK_LABEL[h.state] || h.action || h.state || "событие")}${h.actor?.agent ? ` · ${esc(h.actor.agent)}` : h.agent ? ` · ${esc(h.agent)}` : ""}${h.note ? ` · ${esc(h.note)}` : ""}</li>`).join("") || "<li>Истории пока нет.</li>"}</ul><div class="buttons"><button data-close>Закрыть</button></div>`, (node) => {
     const pb = node.querySelector("#task-prompt-body");
-    if (pb) pb.textContent = t.prompt;
+    if (pb) {
+      if (t.prompt !== undefined) pb.textContent = t.prompt;
+      else { pb.textContent = "Загружаю промпт…"; ensureFullTask(t).then(() => { if (node.isConnected) pb.textContent = t.prompt || ""; }).catch(() => {}); }
+    }
   }, { wide: true });
 }
 function checksMarkup(checks) {
@@ -1183,6 +1232,72 @@ async function api(path, body, server) {
   return r.json();
 }
 
+function applyStateUpdate(next) {
+  if (!next.delta || !data) {
+    if (data) {
+      const prevTodos = new Map((data.todos || []).map((t) => [t.id, t]));
+      if (Array.isArray(next.todos)) {
+        next.todos = next.todos.map((t) => {
+          const old = prevTodos.get(t.id);
+          if (old && old.message !== undefined && t.message === undefined && old.updated === t.updated && old.message_id === t.message_id) {
+            return { ...t, message: old.message, forward_text: old.forward_text };
+          }
+          return t;
+        });
+      }
+      const prevTasks = new Map(taskList().map((t) => [t.task_id, t]));
+      if (Array.isArray(next.tasks)) {
+        next.tasks = next.tasks.map((t) => {
+          const old = prevTasks.get(t.task_id);
+          if (old && old.prompt !== undefined && t.prompt === undefined && old.updated === t.updated) {
+            return { ...t, prompt: old.prompt };
+          }
+          return t;
+        });
+      }
+    }
+    data = next;
+    return;
+  }
+  const removeTasks = new Set(next.tasks_remove || []);
+  const upsertTasks = new Map((next.tasks_upsert || []).map((t) => [t.task_id, t]));
+  const mergedTasks = [];
+  for (const old of taskList()) {
+    if (removeTasks.has(old.task_id)) continue;
+    if (upsertTasks.has(old.task_id)) {
+      const fresh = upsertTasks.get(old.task_id);
+      upsertTasks.delete(old.task_id);
+      if (old.prompt !== undefined && fresh.prompt === undefined && old.updated === fresh.updated) mergedTasks.push({ ...fresh, prompt: old.prompt });
+      else mergedTasks.push(fresh);
+    } else mergedTasks.push(old);
+  }
+  for (const fresh of upsertTasks.values()) mergedTasks.push(fresh);
+
+  const removeTodos = new Set(next.todos_remove || []);
+  const upsertTodos = new Map((next.todos_upsert || []).map((t) => [t.id, t]));
+  const mergedTodos = [];
+  for (const old of (data.todos || [])) {
+    if (removeTodos.has(old.id)) continue;
+    if (upsertTodos.has(old.id)) {
+      const fresh = upsertTodos.get(old.id);
+      upsertTodos.delete(old.id);
+      if (old.message !== undefined && fresh.message === undefined && old.updated === fresh.updated && old.message_id === fresh.message_id) {
+        mergedTodos.push({ ...fresh, message: old.message, forward_text: old.forward_text });
+      } else mergedTodos.push(fresh);
+    } else mergedTodos.push(old);
+  }
+  for (const fresh of upsertTodos.values()) mergedTodos.push(fresh);
+
+  const { delta: _d, base_version: _bv, tasks_upsert: _tu, tasks_remove: _tr, todos_upsert: _mu, todos_remove: _mr, events_unchanged, ...rest } = next;
+  data = {
+    ...data,
+    ...rest,
+    tasks: mergedTasks,
+    todos: mergedTodos,
+    events: events_unchanged ? data.events : (next.events ?? data.events),
+  };
+}
+
 let lastVersion = -1;
 let polling = false;
 async function poll() {
@@ -1195,15 +1310,17 @@ async function poll() {
   }
   polling = true;
   try {
-    // ?since: the PC answers {unchanged} while nothing happened, so the phone does not download the board every 2 s.
-    const next = await api(data ? `/api/state?since=${lastVersion}` : "/api/state");
+    // ?compact=1&since: incremental compact delta while active, {unchanged} while idle.
+    const next = await api(data ? `/api/state?compact=1&since=${lastVersion}` : "/api/state?compact=1");
     online = true;
     lastUpdated = new Date().toISOString();
     if (!next.unchanged) {
-      data = next;
+      applyStateUpdate(next);
       lastVersion = next.version;
       if (resyncToasts) toastSeq = Number(next.alert_seq) || 0;
       checkAlerts();
+      if (todoSearch.trim()) scheduleServerSearch(todoSearch, renderTodos);
+      if (taskSearch.trim()) scheduleServerSearch(taskSearch, renderTasks);
     }
     resyncToasts = false;
   } catch (e) {
@@ -1627,6 +1744,7 @@ const ACTIONS = {
     if (!target) return;
     selected = selectTodoRef(target);
     applySelection();
+    await ensureFullTodo(target);
     await copyPromptText(forwardText(target), e?.target?.closest("button"), target.to);
   },
   async "quick-forward-report"(e) {
@@ -1636,6 +1754,7 @@ const ACTIONS = {
     if (!target) return;
     selected = selectTodoRef(target);
     applySelection();
+    await ensureFullTodo(target);
     await copyPromptText(forwardText(target), e?.target?.closest("button"), target.to);
   },
   "quick-reply"() {
@@ -1917,18 +2036,25 @@ const ACTIONS = {
          ${kv("Пришло с компьютера", fromDeviceLabel(item))}${kv("Отправлено на", item.sent_to && `«${item.sent_to.name}», ${when(item.sent_to.at)}${item.sent_to.auto ? " (само)" : ""}`)}${kv("Не отправилось", !item.done_at && item.send_error)}`
       : `${kv("Состояние", stateLabel(item))}${kv("Этап", item.phase)}${kv("Задача", item.task)}${kv("Кому переслать", item.to)}
          ${kv("Заметка", item.note)}${kv("Результат", item.result)}${kv("Устройство", deviceLabel(item.device_id || data.device_id))}${kv("Сессия", sessionLabel(item))}${kv("Обновлено", when(item.updated))}`;
-    const msgBlock = isTodo && item.message ? `<h3>Сообщение</h3><div class="msg-body"></div><p class="sub">${item.superseded_by ? "Это сообщение заменено новым: его копирование отключено, чтобы не отправить устаревший текст." : "«Копировать» добавляет заголовок Agent Desk и message_id для квитанции агента."}</p>` : "";
+    const hasMsg = isTodo && todoHasCopyableText(item);
+    const msgBlock = hasMsg ? `<h3>Сообщение</h3><div class="msg-body"></div><p class="sub">${item.superseded_by ? "Это сообщение заменено новым: его копирование отключено, чтобы не отправить устаревший текст." : "«Копировать» добавляет заголовок Agent Desk и message_id для квитанции агента."}</p>` : "";
     const historyBlock = history.length ? `<h3>Последние события</h3><div class="sunken-panel" style="max-height:160px"><table><thead><tr><th>Время</th><th>Событие</th><th>Задача</th></tr></thead><tbody>
       ${history.map((e) => `<tr><td class="nowrap">${hhmm(e.time)}</td><td class="nowrap">${esc(stateLabel(e))}${e.to ? ` → ${esc(e.to)}` : ""}</td><td>${esc(e.task)}</td></tr>`).join("")}
       </tbody></table></div>` : "";
     const todoBtns = [];
-    if (isTodo && item.message) todoBtns.push(`<button data-action="copy-message" data-todo-id="${item.id}"${item.superseded_by ? " disabled" : ""}>Копировать</button>`);
+    if (hasMsg) todoBtns.push(`<button data-action="copy-message" data-todo-id="${item.id}"${item.superseded_by ? " disabled" : ""}>Копировать</button>`);
     if (isTodo && !item.done_at && !item.superseded_by && item.kind === "forward" && !item.forwarded_at && !item.acked_at) todoBtns.push(`<button data-action="mark-forwarded" data-todo-id="${item.id}"${online ? "" : " disabled"}>Переслал</button>`);
     if (isTodo && !item.done_at) todoBtns.push(`<button data-action="done-selected" data-todo-id="${item.id}"${online ? "" : " disabled"}>Закрыть</button>`);
     if (isTodo && item.done_at && !item.superseded_by) todoBtns.push(`<button data-action="reopen-todo" data-todo-id="${item.id}"${online ? "" : " disabled"}>Вернуть в очередь</button>`);
     dialog(`${isTodo ? `${cardLabel} — ` : ""}${item.agent} — ${item.project}`, `<dl class="kv">${head}</dl>${technicalDetails(item)}${msgBlock}${historyBlock}
       <div class="buttons">${todoBtns.join("")}<button data-close>OK</button></div>`,
-    (node) => { const mb = node.querySelector(".msg-body"); if (mb) mb.textContent = item.message; }, { wide: true });
+    (node) => {
+      const mb = node.querySelector(".msg-body");
+      if (mb) {
+        if (item.message !== undefined) mb.textContent = item.message;
+        else { mb.textContent = "Загружаю сообщение…"; ensureFullTodo(item).then(() => { if (node.isConnected) mb.textContent = item.message || ""; }).catch(() => {}); }
+      }
+    }, { wide: true });
   },
   "reopen-todo"(e) {
     const button = e?.target?.closest("button");
@@ -1940,7 +2066,9 @@ const ACTIONS = {
     const button = e?.target?.closest("button");
     const id = button?.dataset.todoId ? Number(button.dataset.todoId) : selected?.type === "todo" ? selected.id : null;
     const todo = data.todos.find(t => t.id === id);
-    if (!todo?.message || todo.superseded_by) return;
+    if (!todoHasCopyableText(todo) || todo.superseded_by) return;
+    await ensureFullTodo(todo);
+    if (!todo.message) return;
     await copyPromptText(forwardText(todo), button, todo.to);
   },
   "todo-details"(e) {
@@ -2180,9 +2308,9 @@ document.addEventListener("keydown", (e) => {
   if (!inDialog && !e.target.closest("input, textarea, select, [contenteditable]") && e.key === "Delete" && selected?.type === "todo") ACTIONS["done-selected"]();
 });
 $("#todo-filter")?.addEventListener("change", (e) => { todoFilter = e.target.value; showClosed = false; renderTodos(); });
-$("#todo-search")?.addEventListener("input", (e) => { todoSearch = e.target.value; renderTodos(); });
+$("#todo-search")?.addEventListener("input", (e) => { todoSearch = e.target.value; renderTodos(); scheduleServerSearch(todoSearch, renderTodos); });
 $("#task-filter")?.addEventListener("change", (e) => { taskFilter = e.target.value; taskRenderLimit = 60; renderTasks(); });
-$("#task-search")?.addEventListener("input", (e) => { taskSearch = e.target.value; taskRenderLimit = 60; renderTasks(); });
+$("#task-search")?.addEventListener("input", (e) => { taskSearch = e.target.value; taskRenderLimit = 60; renderTasks(); scheduleServerSearch(taskSearch, renderTasks); });
 
 // Called by the desktop app when "Открыть" is pressed in a popup, and by a tap on a phone notification.
 window.abFocus = (proj, todoId) => {

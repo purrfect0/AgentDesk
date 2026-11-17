@@ -440,6 +440,12 @@ class Desk extends EventEmitter {
     s.alert_seq = Number(s.alert_seq) || 0;
     s.version = (Number(s.version) || 0) + 1;
     this.seen = new Set(s.seen_ids);
+    this._compactCache = null;
+    this._entityVersions = new Map();
+    this._removedEntities = [];
+    this._minDeltaVersion = s.version;
+    this._eventsSig = "";
+    this._eventsVersion = s.version;
   }
 
   /** First run: take folders, agents and reminders from the Python Agent Board (read-only). */
@@ -990,9 +996,16 @@ class Desk extends EventEmitter {
       && !(Array.isArray(this.config.mail_roots) && this.config.mail_roots.length === 0);
   }
 
-  mailPayload() {
+  mailPayload(auth = { local: true }) {
     if (!this.fileSyncEnabled) return { enabled: false, mode: "disabled", roots: [], files: [], errors: [] };
-    return { ...this.mail.payload(), enabled: true };
+    const raw = this.mail.payload();
+    if (auth?.local) return { ...raw, enabled: true };
+    return {
+      ...raw,
+      roots: (raw.roots || []).map((r) => ({ project: r.project })),
+      errors: (raw.errors || []).map((e) => (typeof e === "object" && e ? { project: e.project, error: e.error || e.message || e.status } : e)),
+      enabled: true,
+    };
   }
 
   mailDiagnostics() {
@@ -1071,23 +1084,138 @@ class Desk extends EventEmitter {
     };
   }
 
-  payload() {
+  _scopeTask(enriched, auth = { local: true }) {
+    if (!enriched || auth?.local) return enriched;
+    const copy = structuredClone(enriched);
+    if (copy.checkpoint && typeof copy.checkpoint === "object") {
+      if (copy.checkpoint.repo) delete copy.checkpoint.repo;
+      if (Array.isArray(copy.checkpoint.skills)) {
+        copy.checkpoint.skills = copy.checkpoint.skills.map((s) => (
+          s && typeof s === "object" && s.path && path.isAbsolute(s.path)
+            ? { ...s, path: path.basename(s.path) }
+            : s
+        ));
+      }
+    }
+    return copy;
+  }
+
+  _scopedContext(id, auth = { local: true }) {
+    const res = this.tasks.context(this._resolveTaskId(id));
+    if (auth?.local) return res;
+    const scrub = (txt) => String(txt || "").replace(/[A-Za-z]:\\[^\s"'`)\]]+/g, "<локальный путь ПК>");
+    const checks = structuredClone(res.checks || {});
+    if (Array.isArray(checks.skills)) {
+      checks.skills = checks.skills.map((s) => ({
+        ...s,
+        path: s.path && path.isAbsolute(s.path) ? path.basename(s.path) : s.path,
+      }));
+    }
+    return {
+      text: scrub(res.text),
+      task: this._scopeTask(res.task, auth),
+      checks,
+    };
+  }
+
+  _compactTodo(t) {
+    const { message, ...rest } = t;
+    const msg = String(message || "");
+    return {
+      ...rest,
+      has_message: msg.length > 0,
+      message_chars: msg.length,
+      message_preview: msg.slice(0, 160),
+    };
+  }
+
+  _compactTask(enriched) {
+    const { prompt, history, ...rest } = enriched;
+    const p = String(prompt || "");
+    const hist = Array.isArray(history) ? history : [];
+    return {
+      ...rest,
+      history: hist.slice(-6),
+      history_count: hist.length,
+      has_prompt: p.length > 0,
+      prompt_chars: p.length,
+      prompt_preview: p.slice(0, 160),
+    };
+  }
+
+  _ensureCompactIndex() {
+    const ver = this.state.version;
+    if (this._compactCache && this._compactCache.version === ver) return this._compactCache;
+    if (this._compactCache && ver < this._compactCache.version) {
+      this._entityVersions.clear();
+      this._removedEntities = [];
+      this._minDeltaVersion = ver;
+    }
+    const tasksList = this.tasks.list().map((t) => this._compactTask(this.tasks.enrich(t)));
+    const todosList = this.state.todos.map((t) => this._compactTodo(t));
+    const seenKeys = new Set();
+    for (const ct of tasksList) {
+      const key = `task:${ct.task_id}`;
+      seenKeys.add(key);
+      const json = JSON.stringify(ct);
+      const prev = this._entityVersions.get(key);
+      if (!prev || prev.json !== json) this._entityVersions.set(key, { json, ver });
+    }
+    for (const cm of todosList) {
+      const key = `todo:${cm.id}`;
+      seenKeys.add(key);
+      const json = JSON.stringify(cm);
+      const prev = this._entityVersions.get(key);
+      if (!prev || prev.json !== json) this._entityVersions.set(key, { json, ver });
+    }
+    for (const key of [...this._entityVersions.keys()]) {
+      if (seenKeys.has(key)) continue;
+      this._entityVersions.delete(key);
+      const sep = key.indexOf(":");
+      const kind = key.slice(0, sep);
+      const rawId = key.slice(sep + 1);
+      this._removedEntities.push({ kind, id: kind === "todo" ? Number(rawId) : rawId, ver });
+    }
+    if (this._removedEntities.length > 512) {
+      const dropped = this._removedEntities.splice(0, this._removedEntities.length - 512);
+      this._minDeltaVersion = Math.max(this._minDeltaVersion, dropped.at(-1).ver + 1);
+    }
+    const evSlice = this.state.events.slice(-LIMITS.payloadEvents).map(({ message, ...e }) => e);
+    const evSig = `${this.state.events.length}:${evSlice.at(-1)?.event_id || evSlice.at(-1)?.time || ""}`;
+    if (evSig !== this._eventsSig) {
+      this._eventsSig = evSig;
+      this._eventsVersion = ver;
+    }
+    this._compactCache = { version: ver, tasksList, todosList, evSlice };
+    return this._compactCache;
+  }
+
+  _commonEnvelope(auth = { local: true }) {
+    const localOwner = Boolean(auth?.local);
     const s = this.state;
     const c = this.config;
     const projects = new Set([...Object.values(s.agents).map((a) => a.project), ...c.watch.map((w) => w.project).filter(Boolean)]);
+    const linkPayload = this.peers.payload(auth);
+    const scrubWarn = (txt) => (localOwner ? txt : String(txt || "").replace(/[A-Za-z]:\\[^\s)]+/g, "<локальная папка ПК>"));
     return {
       version: s.version,
+      scope: localOwner ? "loopback_owner" : "lan_phone",
+      verified_capabilities: {
+        local_owner: localOwner,
+        repo_roots_approved: localOwner && Array.isArray(c.task_repo_roots) && c.task_repo_roots.length > 0,
+        skill_roots_approved: localOwner && Array.isArray(c.task_skill_roots) && c.task_skill_roots.length > 0,
+        file_sync_enabled: this.fileSyncEnabled,
+        agent_cli_loopback_only: true,
+      },
       app: { name: "Agent Desk", version: VERSION, protocol: PROTOCOL },
       agents: { ...s.agents, ...Object.fromEntries(Object.entries(s.remote_agents || {}).map(([k, a]) => [`remote:${k}`, a])) },
       device_id: c.device_id,
-      tasks: this.tasks.list().map(t => this.tasks.enrich(t)), bindings: Object.values(s.bindings || {}),
-      mail: this.mailPayload(),
-      todos: s.todos.map((t) => ({ ...t, forward_text: forwardText(t) })),
-      events: s.events.slice(-LIMITS.payloadEvents).map(({ message, ...e }) => e),
+      bindings: Object.values(s.bindings || {}),
+      mail: this.mailPayload(auth),
       rejected: s.rejected.slice(-20).map(({ folder: _f, moved_to: _m, ...r }) => r),
       pipeline: {
         pending: this.pending.size,
-        queued: (this.peers.payload().peers || []).reduce((sum, p) => sum + (p.pending_events || 0), 0),
+        queued: (linkPayload.peers || []).reduce((sum, p) => sum + (p.pending_events || 0), 0),
         rejected: s.rejected.length,
         applied: s.events.length,
         acked: s.todos.filter((t) => t.acked_at).length,
@@ -1095,18 +1223,151 @@ class Desk extends EventEmitter {
       phone_status: this.phoneStatus(),
       alert_seq: s.alert_seq,
       alerts: s.alerts.filter((a) => !a.suppressed).slice(-10),
-      warnings: this.warnings,
+      warnings: this.warnings.map((w) => ({ ...w, text: scrubWarn(w.text) })),
       known_agents: Object.fromEntries([...projects].map((p) => [p, this.knownAgents(p)])),
       config: {
         stale_minutes: c.stale_minutes, notify: c.notify, quiet_hours: c.quiet_hours, notify_projects: c.notify_projects,
-        watch: c.watch, lan: c.lan, popup_sound: c.popup_sound,
+        watch: localOwner ? c.watch : c.watch.map((w) => ({ project: w.project })),
+        lan: c.lan, popup_sound: c.popup_sound,
         popup_volume: c.popup_volume, autostart: c.autostart, retention_days: c.retention_days, agents: c.agents, aliases: c.aliases,
-        task_repo_roots: c.task_repo_roots || [], task_skill_roots: c.task_skill_roots || [], file_sync_enabled: this.fileSyncEnabled,
+        task_repo_roots: localOwner ? (c.task_repo_roots || []) : [],
+        task_skill_roots: localOwner ? (c.task_skill_roots || []) : [],
+        file_sync_enabled: this.fileSyncEnabled,
       },
       server_time: nowIso(),
-      host: os.hostname(),
-      link: this.peers.payload(),
+      host: localOwner ? os.hostname() : (c.device_name || "Agent Desk PC"),
+      link: linkPayload,
     };
+  }
+
+  payload(auth = { local: true }) {
+    const s = this.state;
+    const base = this._commonEnvelope(auth);
+    return {
+      ...base,
+      tasks: this.tasks.list().map((t) => this._scopeTask(this.tasks.enrich(t), auth)),
+      todos: s.todos.map((t) => ({ ...t, forward_text: forwardText(t) })),
+      events: s.events.slice(-LIMITS.payloadEvents).map(({ message, ...e }) => e),
+    };
+  }
+
+  compactPayload(auth = { local: true }, sinceVersion = null) {
+    const idx = this._ensureCompactIndex();
+    const base = this._commonEnvelope(auth);
+    const canDelta = Number.isSafeInteger(sinceVersion)
+      && sinceVersion >= this._minDeltaVersion
+      && sinceVersion < idx.version
+      && (idx.version - sinceVersion) <= 128;
+    if (!canDelta) {
+      return {
+        ...base,
+        compact: true,
+        delta: false,
+        tasks: idx.tasksList.map((t) => this._scopeTask(t, auth)),
+        todos: idx.todosList,
+        events: idx.evSlice,
+      };
+    }
+    const eventsUnchanged = this._eventsVersion <= sinceVersion;
+    return {
+      ...base,
+      compact: true,
+      delta: true,
+      base_version: sinceVersion,
+      tasks_upsert: idx.tasksList
+        .filter((t) => (this._entityVersions.get(`task:${t.task_id}`)?.ver ?? idx.version) > sinceVersion)
+        .map((t) => this._scopeTask(t, auth)),
+      tasks_remove: this._removedEntities.filter((r) => r.kind === "task" && r.ver > sinceVersion).map((r) => r.id),
+      todos_upsert: idx.todosList.filter((t) => (this._entityVersions.get(`todo:${t.id}`)?.ver ?? idx.version) > sinceVersion),
+      todos_remove: this._removedEntities.filter((r) => r.kind === "todo" && r.ver > sinceVersion).map((r) => r.id),
+      events_unchanged: eventsUnchanged,
+      events: eventsUnchanged ? [] : idx.evSlice,
+    };
+  }
+
+  itemPayload(url, auth = { local: true }) {
+    const rawTodo = clean(url.searchParams.get("todo"), 128);
+    const rawTask = clean(url.searchParams.get("task"), 128);
+    let todo = null;
+    if (rawTodo) {
+      todo = this.state.todos.find((t) => (
+        String(t.id) === rawTodo
+        || t.message_id === rawTodo.toLowerCase()
+        || String(t.display_id || "").toUpperCase() === rawTodo.toUpperCase()
+      )) || null;
+    }
+    let taskObj = null;
+    if (rawTask) {
+      const resolved = this._resolveTaskId(rawTask);
+      const key = typeof resolved === "string" ? resolved.toLowerCase() : resolved;
+      taskObj = this.state.tasks?.[key] || this.state.tasks?.[resolved] || null;
+    } else if (todo?.task_id) {
+      taskObj = this.state.tasks?.[todo.task_id] || null;
+    }
+    if (!todo && !taskObj) return null;
+    return {
+      todo: todo ? { ...todo, forward_text: forwardText(todo) } : null,
+      task: taskObj ? this._scopeTask(this.tasks.enrich(taskObj), auth) : null,
+    };
+  }
+
+  searchPayload(url) {
+    const rawQ = String(url.searchParams.get("q") || "").trim().slice(0, 400);
+    const projFilter = clean(url.searchParams.get("project"), 80);
+    if (!rawQ) return { q: "", todo_ids: [], task_ids: [] };
+    const words = rawQ.toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    const peerNames = new Map((this.config.peers || []).map((p) => [p.id, p.name]));
+    const devLabel = (id) => (id === this.config.device_id ? (this.config.device_name || "этот компьютер") : peerNames.get(id) || "");
+    const aliasesOf = (proj, name) => {
+      if (!name) return [];
+      const low = String(name).toLocaleLowerCase();
+      const merged = { ...(this.config.aliases["*"] || {}), ...(proj ? (this.config.aliases[proj] || {}) : {}) };
+      const out = [];
+      for (const [al, can] of Object.entries(merged)) {
+        if (String(can).toLocaleLowerCase() === low || String(al).toLocaleLowerCase() === low) out.push(al, can);
+      }
+      return out;
+    };
+    const matches = (parts) => {
+      const hay = parts.filter(Boolean).join(" ").toLocaleLowerCase();
+      return words.every((w) => hay.includes(w));
+    };
+    const todoIds = [];
+    const todosByTask = new Map();
+    for (const t of this.state.todos) {
+      if (t.task_id) {
+        let arr = todosByTask.get(t.task_id);
+        if (!arr) { arr = []; todosByTask.set(t.task_id, arr); }
+        arr.push(t);
+      }
+      if (projFilter && projFilter !== "*" && t.project !== projFilter) continue;
+      const cardId = t.task_id ? this.state.task_card_ids?.[t.task_id] : "";
+      const taskState = t.task_id ? this.state.tasks?.[t.task_id]?.state : "";
+      const devId = t.recipient_device_id || t.origin_device_id || t.from_device?.id || "";
+      if (matches([
+        t.display_id, `AD-${t.id}`, t.message_id, t.task_id, t.project_id, t.ref,
+        cardId, taskState, t.task, t.project, t.agent, ...aliasesOf(t.project, t.agent),
+        t.to, ...aliasesOf(t.project, t.to), devId, devLabel(devId), t.from_device?.name,
+        t.kind, t.note, t.result, t.message,
+      ])) todoIds.push(t.id);
+    }
+    const taskLabel = { assigned: "назначена", working: "в работе", submitted: "сдана на проверку", accepted: "принята", rework: "на доработке", blocked: "заблокирована", cancelled: "отменена", archived: "в архиве" };
+    const taskIds = [];
+    for (const t of Object.values(this.state.tasks || {})) {
+      if (projFilter && projFilter !== "*" && t.project !== projFilter) continue;
+      const cardId = this.state.task_card_ids?.[t.task_id] || "";
+      const linked = todosByTask.get(t.task_id) || [];
+      if (matches([
+        cardId, t.task_id, t.project_id, t.assignment_message_id, t.title, t.project,
+        t.assignment?.agent, ...aliasesOf(t.project, t.assignment?.agent),
+        t.assignment?.device_id, devLabel(t.assignment?.device_id),
+        t.coordinator_device_id, devLabel(t.coordinator_device_id),
+        t.state, taskLabel[t.state], t.status_reason,
+        t.checkpoint?.branch, t.checkpoint?.commit, t.checkpoint?.report, t.checkpoint?.next_step,
+        t.prompt, ...linked.flatMap((r) => [r.display_id, r.message_id, r.to, r.message]),
+      ])) taskIds.push(t.task_id);
+    }
+    return { q: rawQ, todo_ids: todoIds, task_ids: taskIds };
   }
 
   reconcileReport() {
@@ -1334,10 +1595,17 @@ class Desk extends EventEmitter {
       }
       if (url.pathname === "/api/state") {
         if (!auth.local || APP_ORIGINS.has(req.headers.origin)) this.lastPhoneSeenAt = nowIso();
-        const since = Number(url.searchParams.get("since"));
-        if (url.searchParams.has("since") && since === this.state.version) return this._send(res, 200, { unchanged: true, version: since }, cors);
-        return this._send(res, 200, this.payload(), cors);
+        const hasSince = url.searchParams.has("since");
+        const since = hasSince ? Number(url.searchParams.get("since")) : null;
+        if (hasSince && since === this.state.version) return this._send(res, 200, { unchanged: true, version: since }, cors);
+        if (url.searchParams.get("compact") === "1") return this._send(res, 200, this.compactPayload(auth, hasSince && Number.isSafeInteger(since) ? since : null), cors);
+        return this._send(res, 200, this.payload(auth), cors);
       }
+      if (url.pathname === "/api/item") {
+        const item = this.itemPayload(url, auth);
+        return item ? this._send(res, 200, item, cors) : this._send(res, 404, { error: "not found" }, cors);
+      }
+      if (url.pathname === "/api/search") return this._send(res, 200, this.searchPayload(url), cors);
       if (url.pathname === "/api/alert") {
         const a = this.state.alerts.find((x) => String(x.id) === url.searchParams.get("id"));
         return a ? this._send(res, 200, a, cors) : this._send(res, 404, { error: "not found" }, cors);
@@ -1347,9 +1615,9 @@ class Desk extends EventEmitter {
         return this._waitAlerts(res, url, cors);
       }
       if (url.pathname === "/api/diagnostics") return this._send(res, 200, this.diagnosticsExport(), cors);
-      if (url.pathname === "/api/mail") return this._send(res, 200, this.mailPayload(), cors);
+      if (url.pathname === "/api/mail") return this._send(res, 200, this.mailPayload(auth), cors);
       if (url.pathname === "/api/tasks/context") {
-        try { return this._send(res, 200, this.tasks.context(this._resolveTaskId(url.searchParams.get("id"))), cors); }
+        try { return this._send(res, 200, this._scopedContext(url.searchParams.get("id"), auth), cors); }
         catch (e) { return this._send(res, e.status || 400, { error: e.message }, cors); }
       }
       if (url.pathname === "/api/reconcile") {
@@ -1583,6 +1851,7 @@ class Desk extends EventEmitter {
         this._bump();
         return { body: this.pairing() };
       case "/api/rejected/clear": {
+        if (!auth.local) return { code: 403, body: { error: "только на ПК" } };
         const before = JSON.parse(JSON.stringify(this.state));
         s.rejected = [];
         try { this._saveState(); } catch (e) { this.state = before; return { code: 500, body: { error: `не удалось сохранить состояние: ${e.message}` } }; }
@@ -1601,7 +1870,7 @@ class Desk extends EventEmitter {
 
   _updateConfig(body, auth) {
     const c = this.config;
-    const admin = ["watch", "lan", "agents", "aliases", "allowed_hosts", "retention_days", "task_repo_roots", "task_skill_roots"].filter((k) => k in body);
+    const admin = ["watch", "lan", "autostart", "agents", "aliases", "allowed_hosts", "retention_days", "task_repo_roots", "task_skill_roots"].filter((k) => k in body);
     if (admin.length && !auth.local) return { code: 403, body: { error: `эти настройки меняются только на ПК: ${admin.join(", ")}` } };
     let watch = null;
     if ("watch" in body) {

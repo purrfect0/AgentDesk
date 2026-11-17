@@ -696,7 +696,8 @@ class PeerLink {
   }
 
   /** For the UI (no keys): this device, paired desks, desks nearby, open requests. */
-  payload() {
+  payload(auth = { local: true }) {
+    const localOwner = Boolean(auth?.local);
     const c = this.config;
     const j = this.desk.state.sync || {};
     const totalSeq = (j.base_seq || 0) + (j.events?.length || 0);
@@ -743,9 +744,9 @@ class PeerLink {
           mail: s.mail || null,
         };
       }),
-      nearby: [...this.nearby.values()].filter((n) => !this.peer(n.id)).map(({ id, name, ip, port }) => ({ id, name, ip, port })),
-      requests: [...this.requests.values()].map(({ id, name, ip, code, time }) => ({ id, name, ip, code, time })),
-      outgoing: [...this.outgoing.values()].map(({ id, name, base, code, time }) => ({ id, name, base, code, time })),
+      nearby: localOwner ? [...this.nearby.values()].filter((n) => !this.peer(n.id)).map(({ id, name, ip, port }) => ({ id, name, ip, port })) : [],
+      requests: localOwner ? [...this.requests.values()].map(({ id, name, ip, code, time }) => ({ id, name, ip, code, time })) : [],
+      outgoing: localOwner ? [...this.outgoing.values()].map(({ id, name, base, code, time }) => ({ id, name, base, code, time })) : [],
     };
   }
 }
