@@ -13,11 +13,11 @@ const NEXT = {
   assigned: ["working", "submitted", "blocked", "cancelled", "archived"],
   working: ["submitted", "blocked", "cancelled"],
   submitted: ["accepted", "rework", "blocked", "cancelled"],
-  accepted: ["archived"],
+  accepted: ["rework", "archived"],
   rework: ["working", "submitted", "blocked", "cancelled"],
   blocked: ["assigned", "working", "submitted", "rework", "cancelled", "archived"],
-  cancelled: ["archived"],
-  archived: [],
+  cancelled: ["rework", "archived"],
+  archived: ["rework"],
 };
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -101,19 +101,24 @@ function narrative(value, field) {
   return value;
 }
 function checkpoint(value) {
-  keys(value, ["repo", "branch", "commit", "report", "manifest", "next_step", "constraints", "skills"], "checkpoint");
+  keys(value, ["repo", "branch", "commit", "report", "manifest", "next_step", "constraints", "skills", "verification_steps", "out_dir"], "checkpoint");
   const out = {};
   for (const name of ["repo", "branch", "commit", "report", "next_step"]) {
     if (value[name] !== undefined) out[name] = text(value[name], `checkpoint.${name}`, name === "next_step" ? 4000 : 1024);
   }
   for (const name of ["report", "next_step"]) if (out[name]) out[name] = narrative(out[name], `checkpoint.${name}`);
   if (out.repo) out.repo = absolutePath(out.repo, "checkpoint.repo");
+  if (value.out_dir !== undefined && String(value.out_dir).trim() !== "") out.out_dir = relative(value.out_dir, "checkpoint.out_dir");
   if (out.branch && (!/^[a-z0-9_./-]+$/i.test(out.branch) || /^[-/]|[/.]$|\.\.|\/\/|\.lock(?:\/|$)/.test(out.branch))) fail(400, "checkpoint.branch is not a safe Git ref");
   if (out.commit && !/^(?:[a-f0-9]{7,40}|[a-f0-9]{64})$/i.test(out.commit)) fail(400, "checkpoint.commit must be a Git object hex id");
   if (value.manifest !== undefined) out.manifest = artifacts(value.manifest);
   if (value.constraints !== undefined) {
     if (!Array.isArray(value.constraints) || value.constraints.length > 32) fail(400, "checkpoint.constraints must be a bounded list");
     out.constraints = value.constraints.map((s) => narrative(text(s, "constraint", 1000, true), "constraint"));
+  }
+  if (value.verification_steps !== undefined) {
+    if (!Array.isArray(value.verification_steps) || value.verification_steps.length > 20) fail(400, "checkpoint.verification_steps must be a list of at most 20 text items");
+    out.verification_steps = value.verification_steps.map((s) => text(s, "verification_step", 500, true));
   }
   if (value.skills !== undefined) {
     if (!Array.isArray(value.skills) || value.skills.length > 8) fail(400, "checkpoint.skills must select at most 8 files");
@@ -314,8 +319,9 @@ class TaskService {
     if (s.todos.some(t => t.message_id === messageId)) { task.assignment_message_id = messageId; return; }
     const a = task.assignment, time = task.updated;
     const cp = task.checkpoint || {};
-    const context = [["Репозиторий", cp.repo], ["Ветка", cp.branch], ["Коммит", cp.commit], ["Отчёт", cp.report], ["Следующий шаг", cp.next_step]]
+    const context = [["Репозиторий", cp.repo], ["Ветка", cp.branch], ["Коммит", cp.commit], ["Папка OUT", cp.out_dir], ["Отчёт", cp.report], ["Следующий шаг", cp.next_step]]
       .filter(([, value]) => value).map(([label, value]) => `${label}: ${value}`);
+    if (cp.verification_steps?.length) context.push(`Проверочные команды (текст для исполнителя, без автозапуска):\n${cp.verification_steps.map(value => `- ${value}`).join("\n")}`);
     if (cp.constraints?.length) context.push(`Ограничения:\n${cp.constraints.map(value => `- ${value}`).join("\n")}`);
     const message = [task.prompt || task.title, ...context].join("\n\n");
     const id = s.next_id || 1;
@@ -502,6 +508,13 @@ class TaskService {
     return clone(task);
   }
 
+  _checkAgentRegistryActive(project, agent) {
+    const status = this.desk.agentRegistryStatus?.(project, agent);
+    if (status === "paused" || status === "archived") {
+      fail(409, `Agent "${agent}" is ${status} in the project registry; activate it before assignment`);
+    }
+  }
+
   assign(body) {
     if (!object(body)) fail(400, "body must be an object");
     const reqSpec = this._requestSpec("assign", body);
@@ -515,7 +528,9 @@ class TaskService {
       if (this._isExactEpochRetry("assign", body, task)) return clone(task);
       this._expected(body, task);
     }
-    const assignment = this._assignment({ ...body, project: body.project ?? task?.project }, { device_id: coordinator });
+    const targetProject = body.project ?? task?.project;
+    const assignment = this._assignment({ ...body, project: targetProject }, { device_id: coordinator });
+    this._checkAgentRegistryActive(targetProject, assignment.agent);
     const prior = task?.assignment;
     if (prior) {
       if (prior.epoch === Number.MAX_SAFE_INTEGER) fail(409, "Assignment epoch exhausted");
@@ -573,6 +588,7 @@ class TaskService {
     task.state = this._state(body, task);
     if (task.state === "cancelled") task.status_reason = reasonText;
     else if (task.state === "archived") task.status_reason = reasonText || task.status_reason || "Перенесено в архив владельцем";
+    else if (task.state === "rework") delete task.status_reason;
     metadata(body, task);
     this._history(task, "transition", { ...body, note: body.note ?? reasonText }, old, undefined, actor);
     return this._put(task, true, false, reqSpec);
@@ -590,6 +606,7 @@ class TaskService {
     this._expected(body, task);
     const prior = clone(task.assignment);
     const assignment = this._assignment({ ...body, project: task.project }, prior);
+    this._checkAgentRegistryActive(task.project, assignment.agent);
     if (assignment.device_id === prior.device_id && assignment.session_id === prior.session_id && this._same(assignment.agent, prior.agent, task.project)) fail(409, "Handoff must select a different agent, device or session");
     if (prior.epoch === Number.MAX_SAFE_INTEGER) fail(409, "Assignment epoch exhausted");
     assignment.epoch = prior.epoch + 1;
@@ -751,7 +768,9 @@ class TaskService {
     if (task.prompt) lines.push("\n[Assignment prompt]", task.prompt, "[End assignment prompt]\n");
     if (task.assignment_message_id) lines.push(`message_id: ${task.assignment_message_id}; use this UUID to acknowledge receipt`);
     if (cp.next_step) lines.push(`next_step: ${cp.next_step}`);
+    if (cp.out_dir) lines.push(`out_dir: ${cp.out_dir}`);
     if (cp.report) lines.push(`report (unread metadata): ${cp.report}`);
+    if (cp.verification_steps?.length) lines.push("[Verification commands — plain text for executor, never run automatically by Agent Desk]", ...cp.verification_steps.map((s) => `- ${s}`));
     if (cp.constraints?.length) lines.push("constraints:", ...cp.constraints.map((s) => `- ${s}`));
     let repo;
     if (cp.repo) {
@@ -831,6 +850,110 @@ class TaskService {
     }
     lines.push(`\nVerification: ${JSON.stringify(checks)}`);
     return { text: redacted(lines.join("\n")), task: safeOutput(task), checks: safeOutput(checks) };
+  }
+
+  launch(body) {
+    if (!object(body)) fail(400, "body must be an object");
+    const task = this.get(body.task_id ?? body.id);
+    this._coordinator(task);
+    this._project(body, task);
+    if (body.assignment_epoch !== undefined || body.epoch !== undefined) this._expected(body, task);
+    const reqId = body.request_id !== undefined && body.request_id !== null && body.request_id !== "" ? identity(body.request_id, "request_id", true) : "";
+    const adapterId = body.adapter !== undefined ? identity(body.adapter, "adapter", true) : (task.assignment?.adapter || "manual");
+    if (task.launch?.status === "dispatched_dry_run"
+      && task.launch.assignment_epoch === task.assignment.epoch
+      && task.launch.adapter === adapterId
+      && (task.launch.request_id || "") === reqId) {
+      return { task: this.enrich(task), receipt: { ...clone(task.launch), duplicate: true } };
+    }
+    if (!this.desk.adapters) fail(501, "Adapter registry is not initialized");
+    const todo = (this.desk.state.todos || []).find((t) => t.message_id === task.assignment_message_id) || null;
+    const forwardTxt = this.desk._buildForwardText ? (todo ? this.desk._buildForwardText(todo) : (task.prompt || task.title)) : (todo?.message || task.prompt || task.title);
+    const receipt = this.desk.adapters.launch(adapterId, {
+      task,
+      message: todo?.message || task.prompt || "",
+      forward_text: forwardTxt,
+      request_id: reqId,
+    }, this.desk.config);
+    if (!receipt.duplicate) {
+      const before = clone(this.desk.state);
+      try {
+        task.launch = receipt;
+        if (todo) {
+          todo.launch_dispatched_at = receipt.dispatched_at;
+          todo.launch_adapter = receipt.adapter;
+          todo.updated = receipt.dispatched_at;
+        }
+        this._history(task, "launch_dry_run", { note: `Отправлено в адаптер ${receipt.adapter} (до фактического ACK)` }, task.state);
+        this.desk.state.tasks = { ...this.desk.state.tasks, [task.task_id]: task };
+        this.desk._saveState();
+      } catch (e) {
+        this.desk.state = before;
+        throw e;
+      }
+      this.desk.emit("change");
+    }
+    return { task: this.enrich(task), receipt };
+  }
+
+  handoffPackage(id, auth = { local: true }) {
+    const task = this.get(id);
+    const enriched = this.enrich(task);
+    const cp = clone(enriched.checkpoint || {});
+    if (!auth?.local && cp.repo) delete cp.repo;
+    const a = enriched.assignment || {};
+    return safeOutput({
+      schema: "agent-desk.handoff.v1",
+      generated_at: now(),
+      notice: "Human-readable handoff package. Verification commands are plain text for the executor; Agent Desk never executes shell commands.",
+      task: {
+        task_id: enriched.task_id,
+        card_id: enriched.card_id || null,
+        project: enriched.project,
+        project_id: enriched.project_id,
+        title: enriched.title,
+        state: enriched.state,
+        coordinator_device_id: enriched.coordinator_device_id,
+        assignment_epoch: a.epoch,
+        assignment_message_id: enriched.assignment_message_id || null,
+        recipient: {
+          agent: a.agent,
+          device_id: a.device_id,
+          session_id: a.session_id,
+          role: a.role,
+          adapter: a.adapter,
+        },
+      },
+      prompt: enriched.prompt || "",
+      checkpoint: cp,
+      artifacts: enriched.artifacts || [],
+      handback_template: {
+        project: enriched.project,
+        project_id: enriched.project_id,
+        agent: a.agent || "<Agent>",
+        session_id: a.session_id || "<session-id>",
+        device_id: a.device_id || "<device-id>",
+        task_id: enriched.task_id,
+        assignment_epoch: a.epoch || 1,
+        seq: 2,
+        state: "done",
+        execution_state: "submitted",
+        to: "Владелец",
+        task: enriched.title,
+        message: "<Краткий итог для ведущего: что сделано, ветка/SHA, путь к отчёту, открытые пункты>",
+        result: cp.report || (cp.out_dir ? `${cp.out_dir}/REPORT.md` : "OUT/REPORT.md"),
+        checkpoint: {
+          branch: cp.branch || "<branch>",
+          commit: "<40-char-sha>",
+          out_dir: cp.out_dir || "OUT",
+          report: cp.report || "OUT/REPORT.md",
+          next_step: "Проверить отчёт и подтвердить приёмку ведущим",
+        },
+        artifacts: (enriched.artifacts || []).length
+          ? enriched.artifacts.map((art) => ({ path: art.path, sha256: art.sha256 || "<64-char-sha256>", status: "submitted" }))
+          : [{ path: "OUT/REPORT.md", sha256: "<64-char-sha256>", status: "submitted" }],
+      },
+    });
   }
 }
 

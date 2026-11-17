@@ -586,7 +586,7 @@ async function copySelectedTodo(e) {
 // --- linked tasks and project files ----------------------------------------------
 // Preserve the established 98.css windows, inset panels, controls and quiet typography.
 const TASK_LABEL = { assigned: "назначена", working: "в работе", submitted: "сдана на проверку", accepted: "принята", rework: "на доработке", blocked: "заблокирована", cancelled: "отменена", archived: "в архиве" };
-const TASK_NEXT = { assigned: ["working", "submitted", "blocked", "cancelled", "archived"], working: ["submitted", "blocked", "cancelled"], submitted: ["accepted", "rework", "blocked", "cancelled"], accepted: ["archived"], rework: ["working", "submitted", "blocked", "cancelled"], blocked: ["assigned", "working", "submitted", "rework", "cancelled", "archived"], cancelled: ["archived"], archived: [] };
+const TASK_NEXT = { assigned: ["working", "submitted", "blocked", "cancelled", "archived"], working: ["submitted", "blocked", "cancelled"], submitted: ["accepted", "rework", "blocked", "cancelled"], accepted: ["rework", "archived"], rework: ["working", "submitted", "blocked", "cancelled"], blocked: ["assigned", "working", "submitted", "rework", "cancelled", "archived"], cancelled: ["rework", "archived"], archived: ["rework"] };
 const listValues = (value) => Array.isArray(value) ? value : Object.values(value || {});
 function taskList() {
   // Replication can briefly include duplicate snapshots; identity is never the display title.
@@ -625,7 +625,7 @@ function receiptsMarkup(t) {
   const rows = taskReceiptRows(t);
   if (!rows.length) return '<span class="sub">Сообщений и квитанций пока нет.</span>';
   return rows.map((r) => `<li><code>${esc(r.display_id || `AD-${r.id}`)}</code>${r.to ? ` → ${esc(r.to)}` : ""} · ${[
-    ["delivered_at", "доставлено на доску"], ["forwarded_at", "переслано"], ["acked_at", "ACK: получено"], ["done_at", "напоминание закрыто"]
+    ["delivered_at", "доставлено на доску"], ["launch_dispatched_at", "отправлено в адаптер (до ACK)"], ["forwarded_at", "переслано"], ["acked_at", "ACK: получено"], ["done_at", "напоминание закрыто"]
   ].filter(([k]) => r[k]).map(([k, title]) => `<span title="${esc(r[k])}">${title}</span>`).join(" · ") || "ожидает доставки"}</li>`).join("");
 }
 function assignmentMessage(t) {
@@ -834,7 +834,7 @@ function renderTasks() {
       <details><summary>Сообщения и квитанции (${taskReceiptRows(t).length})</summary><ul class="receipt-list">${receiptsMarkup(t)}</ul><p class="sub">ACK подтверждает только получение, а не выполнение или приёмку.</p></details>
       ${histRows.length ? `<details><summary>История действий (${t.history.length})</summary><ul class="receipt-list">${histRows.map((h) => `<li>${esc(h.time ? `${hhmm(h.time)} · ${ago(h.time)}` : "")} · ${esc(TASK_LABEL[h.state] || h.kind || h.state || "событие")}${h.actor?.agent ? ` · ${esc(h.actor.agent)}` : h.agent ? ` · ${esc(h.agent)}` : ""}${h.device_id ? ` (${esc(deviceLabel(h.device_id))})` : ""}${h.note ? ` — ${esc(h.note)}` : ""}</li>`).join("")}</ul></details>` : ""}
       ${technicalDetails(t)}
-      <div class="task-actions"><button data-task-action="copy" data-task-id="${esc(t.task_id)}"${message || online ? "" : " disabled"}>${esc(copy)}</button>${message && !message.forwarded_at && !message.acked_at && !message.done_at ? `<button data-action="mark-forwarded" data-todo-id="${message.id}"${online ? "" : " disabled"}>Переслал</button>` : ""}${t.state === "submitted" ? `<button data-task-action="review" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Проверить сдачу…</button>` : ""}${boundAg?.state === "waiting" && boundAg?.waiting_for === "resource" ? `<button data-task-action="release-resource" data-task-id="${esc(t.task_id)}">Освободить ресурс…</button>` : ""}<button data-task-action="details" data-task-id="${esc(t.task_id)}">Подробно…</button><button data-task-action="context" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Контекст / копировать…</button><button data-task-action="assign" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Назначить…</button><button data-task-action="transition" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Состояние…</button><button data-task-action="handoff" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Передать…</button></div>
+      <div class="task-actions"><button data-task-action="copy" data-task-id="${esc(t.task_id)}"${message || online ? "" : " disabled"}>${esc(copy)}</button>${message && !message.forwarded_at && !message.acked_at && !message.done_at ? `<button data-action="mark-forwarded" data-todo-id="${message.id}"${online ? "" : " disabled"}>Переслал</button>` : ""}${a.adapter && a.adapter !== "manual" && t.state === "assigned" ? `<button data-task-action="launch" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Запустить (${esc(a.adapter)})</button>` : ""}${t.state === "submitted" ? `<button data-task-action="review" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Проверить сдачу…</button>` : ""}${boundAg?.state === "waiting" && boundAg?.waiting_for === "resource" ? `<button data-task-action="release-resource" data-task-id="${esc(t.task_id)}">Освободить ресурс…</button>` : ""}<button data-task-action="details" data-task-id="${esc(t.task_id)}">Подробно…</button><button data-task-action="context" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Контекст / копировать…</button><button data-task-action="assign" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Назначить…</button><button data-task-action="transition" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Состояние…</button><button data-task-action="handoff" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Передать…</button></div>
       ${readonly ? `<p class="sub">${readonly}</p>` : ""}</article>`;
   }).join("") + (tasks.length > shown.length ? `<div class="tasks-more"><button data-action="tasks-show-all">Показать все карточки (${tasks.length})</button></div>` : "")
     : `<p class="empty">${supported ? (all.length ? "Ничего не найдено по фильтру или поиску." : "Задач пока нет. Назначьте первую задачу; номер карточки сохранится при смене сессии.") : "Ожидается сервер с поддержкой задач."}</p>`);
@@ -888,13 +888,29 @@ function contextDialog(t, result, title = "Контекст задачи — л�
   dialog(title, `<p>Карточка <code>${esc(taskCardNumber(t))}</code>. Проверки выполняются сервером только локально; копирование не запускает агента.</p>
     <div class="context-checks-summary">${checksSummaryHtml(result.checks)}</div>
     <details class="technical-details"><summary>Технические данные проверок (JSON)</summary><pre id="context-checks" class="context-checks" tabindex="0">${esc(checksMarkup(result.checks))}</pre></details>
-    <label for="task-context">Контекст для новой сессии</label><textarea id="task-context" readonly></textarea><p id="context-result" role="status"></p><div class="buttons"><button id="copy-context"${typeof result.text === "string" && result.text.trim() ? "" : " disabled"}>Копировать контекст</button><button data-close>Закрыть</button></div>`, (node) => {
+    <label for="task-context">Контекст для новой сессии</label><textarea id="task-context" readonly></textarea><p id="context-result" role="status"></p><div class="buttons wrap"><button id="copy-context"${typeof result.text === "string" && result.text.trim() ? "" : " disabled"}>Копировать контекст</button><button type="button" id="copy-handoff-json"${online ? "" : " disabled"}>JSON handoff</button><button type="button" id="copy-handback-tpl"${online ? "" : " disabled"}>Шаблон handback</button><button data-close>Закрыть</button></div>`, (node) => {
     const ta = node.querySelector("#task-context"); ta.value = typeof result.text === "string" ? result.text : "";
+    const statusNode = node.querySelector("#context-result");
     node.querySelector("#copy-context").onclick = async () => {
       const ok = await copyText(ta.value);
-      node.querySelector("#context-result").textContent = ok ? "Контекст скопирован. Запустите/подключите новую сессию вручную, если адаптер не поддерживает запуск." : "Буфер обмена недоступен: выделите контекст и скопируйте вручную.";
+      statusNode.textContent = ok ? "Контекст скопирован. Запустите/подключите новую сессию вручную, если адаптер не поддерживает запуск." : "Буфер обмена недоступен: выделите контекст и скопируйте вручную.";
       if (!ok) { ta.focus(); ta.select(); }
     };
+    const copyPkgPart = async (mode) => {
+      try {
+        const pkg = await api(`/api/tasks/handoff-json?id=${encodeURIComponent(t.task_id)}`);
+        const textOut = JSON.stringify(mode === "handback" ? pkg.handback_template : pkg, null, 2);
+        const ok = await copyText(textOut);
+        if (!ok) { ta.value = textOut; ta.focus(); ta.select(); }
+        statusNode.textContent = ok
+          ? (mode === "handback" ? "Шаблон handback JSON скопирован." : "Пакет JSON handoff для внешнего агента скопирован.")
+          : "Буфер обмена недоступен: JSON показан в поле ниже, нажмите Ctrl+C.";
+      } catch (err) {
+        statusNode.textContent = `Не удалось получить JSON: ${err.message}`;
+      }
+    };
+    node.querySelector("#copy-handoff-json").onclick = () => copyPkgPart("handoff");
+    node.querySelector("#copy-handback-tpl").onclick = () => copyPkgPart("handback");
   }, { wide: true });
 }
 async function fetchTaskContext(t) {
@@ -955,8 +971,8 @@ function taskMutationDialog(mode, t, presetState = "") {
   const selectedState = presetState && (TASK_NEXT[t?.state] || []).includes(presetState) && (!["accepted", "rework"].includes(presetState) || canCoordinate(t)) ? presetState : t?.state;
   const lifecycle = mode === "transition" ? `<div class="field-row-stacked"><label for="task-state">Новое состояние (отдельно от ACK)</label><select id="task-state">${Object.entries(TASK_LABEL).map(([k, v]) => `<option value="${k}"${k === selectedState ? " selected" : ""}${k !== t.state && (!(TASK_NEXT[t.state] || []).includes(k) || (["accepted", "rework"].includes(k) && !canCoordinate(t))) ? " disabled" : ""}>${v}</option>`).join("")}</select></div><div class="field-row-stacked"><label for="task-note">Пояснение / причина (обязательно для отмены)</label><input type="text" id="task-note" maxlength="1000"></div>` : assignmentFields(t);
   const promptFields = mode !== "transition" ? '<div class="field-row-stacked"><label for="task-prompt">Промпт для агента</label><textarea id="task-prompt" rows="7" aria-describedby="task-prompt-help task-prompt-stats" placeholder="Что сделать, какой результат нужен, ограничения и ссылки на материалы…"></textarea><div class="draft-row hidden" id="task-draft-row"><span class="sub" id="task-draft-notice">Восстановлен несохранённый черновик промпта.</span><button type="button" id="task-draft-reset">Сбросить черновик</button></div><p class="sub" id="task-prompt-stats" role="status" aria-live="polite"></p><p class="sub" id="task-prompt-help">Копируется целиком с сохранением отступов и строк вместе с реквизитами задания. До 20 000 символов и 58 000 Б UTF-8 пакета; при превышении текст останется в форме.</p></div>' : "";
-  const checkpointFields = mode === "handoff" ? `<details><summary>Checkpoint: репозиторий, ветка, commit, отчёт</summary>${["repo", "branch", "commit", "report"].map((k) => `<div class="field-row-stacked"><label for="checkpoint-${k}">${esc(k)}</label><input type="text" id="checkpoint-${k}" value="${esc(t.checkpoint?.[k])}" autocomplete="off" spellcheck="false" maxlength="1024"></div>`).join("")}<p class="sub">Проверяются только явно разрешённые локальные пути. Список выбранных skills и артефакты сохраняются; содержимое файлов здесь не читается.</p></details>` : "";
-  const handoff = mode === "handoff" ? '<p>Сохраняется текущий checkpoint и артефакты. После передачи получите контекст с результатами локальных проверок. Не вставляйте секреты или команды.</p><div class="field-row-stacked"><label for="handoff-next">Следующий шаг</label><textarea id="handoff-next" class="short-text" maxlength="4000"></textarea></div><div class="field-row-stacked"><label for="handoff-constraints">Ограничения / запреты (по одному на строку)</label><textarea id="handoff-constraints" class="short-text" maxlength="4000"></textarea></div>' : "";
+  const checkpointFields = mode === "handoff" ? `<details><summary>Checkpoint: репозиторий, ветка, commit, OUT, отчёт</summary>${["repo", "branch", "commit", "out_dir", "report"].map((k) => `<div class="field-row-stacked"><label for="checkpoint-${k}">${esc(k)}</label><input type="text" id="checkpoint-${k}" value="${esc(t.checkpoint?.[k])}" autocomplete="off" spellcheck="false" maxlength="1024"></div>`).join("")}<p class="sub">Проверяются только явно разрешённые локальные пути. Список выбранных skills и артефакты сохраняются; содержимое файлов здесь не читается.</p></details>` : "";
+  const handoff = mode === "handoff" ? '<p>Сохраняется текущий checkpoint и артефакты. После передачи получите контекст с результатами локальных проверок. Проверочные команды передаются только как текст для исполнителя (без автозапуска).</p><div class="field-row-stacked"><label for="handoff-next">Следующий шаг</label><textarea id="handoff-next" class="short-text" maxlength="4000"></textarea></div><div class="field-row-stacked"><label for="handoff-verify">Проверочные команды (текст для исполнителя, по одной на строку)</label><textarea id="handoff-verify" class="short-text" maxlength="4000"></textarea></div><div class="field-row-stacked"><label for="handoff-constraints">Ограничения / запреты (по одному на строку)</label><textarea id="handoff-constraints" class="short-text" maxlength="4000"></textarea></div>' : "";
   dialog(label, `<form id="task-form">${newFields}${promptFields}${lifecycle}${checkpointFields}${handoff}<p id="task-error" class="bad" role="status" aria-live="polite"></p><p class="sub">Старое назначение не принимается: при конфликте обновите карточку. Неизвестный адаптер требует ручного запуска.</p><div class="buttons"><button type="submit" id="task-save">${mode === "handoff" ? "Передать и получить контекст" : "Сохранить"}</button><button type="button" data-close>Отмена</button></div></form>`, (node) => {
     if (creating) node.querySelector("#task-project").value = project === "*" ? "" : project;
     const dKey = t ? `${mode}:${t.task_id}` : "assign:new";
@@ -1000,8 +1016,9 @@ function taskMutationDialog(mode, t, presetState = "") {
     }
     if (creating || mode === "handoff") node.querySelector("#assign-session_id").value = `manual-${Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16).padStart(8, "0")).join("")}`;
     if (mode === "handoff") {
-      for (const k of ["repo", "branch", "commit", "report"]) node.querySelector(`#checkpoint-${k}`).value = t.checkpoint?.[k] || "";
+      for (const k of ["repo", "branch", "commit", "out_dir", "report"]) node.querySelector(`#checkpoint-${k}`).value = t.checkpoint?.[k] || "";
       node.querySelector("#handoff-next").value = t.checkpoint?.next_step || "";
+      node.querySelector("#handoff-verify").value = Array.isArray(t.checkpoint?.verification_steps) ? t.checkpoint.verification_steps.join("\n") : "";
       node.querySelector("#handoff-constraints").value = Array.isArray(t.checkpoint?.constraints) ? t.checkpoint.constraints.join("\n") : String(t.checkpoint?.constraints || "");
     }
     const bindings = listValues(data.bindings).filter((b) => !t || b.project === t.project);
@@ -1038,7 +1055,18 @@ function taskMutationDialog(mode, t, presetState = "") {
           return;
         }
         if (prompt || !creating) body.prompt = prompt;
-        if (mode === "handoff") body.checkpoint = { ...t.checkpoint, ...Object.fromEntries(["repo", "branch", "commit", "report"].map((k) => [k, node.querySelector(`#checkpoint-${k}`).value.trim()])), next_step: node.querySelector("#handoff-next").value.trim(), constraints: node.querySelector("#handoff-constraints").value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) };
+        if (mode === "handoff") {
+          const outDirVal = node.querySelector("#checkpoint-out_dir").value.trim();
+          const verifySteps = node.querySelector("#handoff-verify").value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+          body.checkpoint = {
+            ...t.checkpoint,
+            ...Object.fromEntries(["repo", "branch", "commit", "report"].map((k) => [k, node.querySelector(`#checkpoint-${k}`).value.trim()])),
+            ...(outDirVal ? { out_dir: outDirVal } : {}),
+            ...(verifySteps.length ? { verification_steps: verifySteps } : {}),
+            next_step: node.querySelector("#handoff-next").value.trim(),
+            constraints: node.querySelector("#handoff-constraints").value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+          };
+        }
       }
       save.disabled = true; err.textContent = "Сохраняю…";
       let handoffSaved = false;
@@ -1731,10 +1759,110 @@ function diagnosticsDialog() {
   }, { wide: true });
 }
 
+async function launchTaskAdapter(t) {
+  if (!online || !canCoordinate(t)) return;
+  try {
+    const res = await api("/api/tasks/launch", {
+      task_id: t.task_id,
+      project: t.project,
+      project_id: t.project_id,
+      assignment_epoch: taskEpoch(t),
+      adapter: t.assignment?.adapter || "mock-dry-run",
+      request_id: `ui-launch-${t.task_id.slice(0, 8)}-e${taskEpoch(t)}`,
+    });
+    await poll();
+    const rec = res.receipt || {};
+    alertBox("Квитанция адаптера запуска", `${rec.reason || "Запуск отправлен."}\nАдаптер: ${rec.adapter || ""}${rec.duplicate ? " (повтор — идемпотентно)" : ""}\nЭто только квитанция отправки: задача перейдёт в работу только после фактического ACK агента.`, "msg_information-0");
+  } catch (err) {
+    alertBox("Запуск недоступен", err.message, "msg_warning-2");
+  }
+}
+
+function agentRegistryDialog() {
+  const resMap = data?.resources || {};
+  const adapters = listValues(data?.adapters);
+  const regMap = data?.config?.agent_registry || {};
+  const canEdit = online && isLocal && AD_HOST.kind !== "mobile";
+  const curProj = project === "*" ? (allProjects()[0] || "Demo") : project;
+  const entries = regMap[curProj] || [];
+  const resLine = (label, r) => {
+    if (!r) return `<li><b>${label}:</b> <code>UNKNOWN</code> (источник не подключён · только чтение)</li>`;
+    const fresh = r.freshness_sec !== null && r.freshness_sec !== undefined ? `свежесть: ${r.freshness_sec} с` : "свежесть неизвестна";
+    return `<li><b>${label}:</b> <code>${esc(r.status || "UNKNOWN")}</code>${r.holder ? ` · занято: <b>${esc(r.holder)}</b>` : ""} · источник: <code>${esc(r.source || "unconfigured")}</code> · ${esc(fresh)}${r.reason ? ` <span class="sub">(${esc(r.reason)})</span>` : ""}</li>`;
+  };
+  const regRows = entries.length ? `<div class="sunken-panel diag-panel"><table class="diag-table"><thead><tr><th>Агент / алиасы</th><th>Профиль / канал / устройство</th><th>Статус / сессия</th></tr></thead><tbody>${entries.map((r, i) => `<tr data-key="reg:${i}">
+    <td><b>${esc(r.name)}</b>${r.aliases?.length ? `<br><span class="sub">алиасы: ${esc(r.aliases.join(", "))}</span>` : ""}</td>
+    <td>${r.capabilities?.length ? esc(r.capabilities.join(", ")) : '<span class="sub">возможности не заявлены (не угадываются)</span>'}<br><span class="sub">канал: ${esc(r.verified_channel || "не подтверждён")} · ПК: ${esc(deviceLabel(r.device_id))}</span></td>
+    <td><code>${esc(r.status)}</code>${r.session_id ? `<br><span class="sub">сессия привязана</span>` : ""}${canEdit && r.status === "active" ? `<br><button type="button" data-rotate-agent="${esc(r.name)}" data-rotate-proj="${esc(curProj)}">Сменить сессию</button>` : ""}</td>
+  </tr>`).join("")}</tbody></table></div>` : `<p class="sub">В проекте «${esc(curProj)}» пока нет записей реестра. Возможности агентов никогда не выдумываются из имени провайдера.</p>`;
+
+  dialog("Реестр агентов, адаптеры и ресурсы", `<h3>Ресурсы (только чтение, без захвата блокировок)</h3>
+    <ul class="receipt-list">${resLine("Телефон", resMap.phone)}${resLine("Сервер", resMap.server)}</ul>
+    <h3>Адаптеры запуска</h3>
+    <ul class="receipt-list">${adapters.length ? adapters.map((ad) => `<li><code>${esc(ad.adapter)}</code> (${esc(ad.mode)}): <span class="${ad.available ? "ok" : "bad"}">${ad.available ? "доступен" : "отключён"}</span> — ${esc(ad.reason || "")}</li>`).join("") : "<li><code>manual</code>: ручной режим по умолчанию</li>"}</ul>
+    <h3>Реестр агентов — проект «${esc(curProj)}»</h3>
+    ${regRows}
+    ${canEdit ? `<form id="reg-form"><fieldset><legend>Добавить / обновить агента в проекте</legend>
+      <div class="assignment-grid">
+        <div class="field-row-stacked"><label for="reg-proj">Проект</label><input type="text" id="reg-proj" value="${esc(curProj)}" required maxlength="60"></div>
+        <div class="field-row-stacked"><label for="reg-name">Имя агента</label><input type="text" id="reg-name" required maxlength="60" placeholder="Carbon"></div>
+      </div>
+      <div class="assignment-grid">
+        <div class="field-row-stacked"><label for="reg-aliases">Алиасы (через запятую)</label><input type="text" id="reg-aliases" maxlength="240" placeholder="карбон, carbon-1"></div>
+        <div class="field-row-stacked"><label for="reg-caps">Подтверждённые возможности (через запятую)</label><input type="text" id="reg-caps" maxlength="240" placeholder="cli, review"></div>
+      </div>
+      <div class="assignment-grid">
+        <div class="field-row-stacked"><label for="reg-status">Статус в проекте</label><select id="reg-status"><option value="active">active (активен)</option><option value="paused">paused (пауза)</option><option value="archived">archived (архив)</option></select></div>
+        <div class="field-row-stacked"><label for="reg-adapter">Адаптер</label><select id="reg-adapter"><option value="manual">manual (вручную)</option><option value="mock-dry-run">mock-dry-run (локальный тест)</option></select></div>
+      </div>
+      <p id="reg-msg" class="sub" role="status"></p>
+      <div class="buttons"><button type="submit" id="reg-save">Сохранить агента</button><button type="button" data-close>Закрыть</button></div>
+    </fieldset></form>` : '<div class="buttons"><button type="button" data-close>Закрыть</button></div>'}`, (node) => {
+    node.addEventListener?.("click", async (e) => {
+      const btn = e.target?.closest?.("[data-rotate-agent]");
+      if (!btn) return;
+      btn.disabled = true;
+      try {
+        await api("/api/agents/rotate-session", { project: btn.dataset.rotateProj, agent: btn.dataset.rotateAgent });
+        await poll();
+        if (node.isConnected) agentRegistryDialog();
+      } catch (err) {
+        const msg = node.querySelector("#reg-msg");
+        if (msg) msg.textContent = `Ошибка смены сессии: ${err.message}`;
+        btn.disabled = false;
+      }
+    });
+    const form = node.querySelector("#reg-form");
+    if (form) form.onsubmit = async (e) => {
+      e.preventDefault();
+      const save = node.querySelector("#reg-save"), msg = node.querySelector("#reg-msg");
+      const entry = {
+        name: node.querySelector("#reg-name").value.trim(),
+        aliases: node.querySelector("#reg-aliases").value.split(",").map((s) => s.trim()).filter(Boolean),
+        capabilities: node.querySelector("#reg-caps").value.split(",").map((s) => s.trim()).filter(Boolean),
+        status: node.querySelector("#reg-status").value || "active",
+        adapter: node.querySelector("#reg-adapter").value || "manual",
+        device_id: data.device_id,
+      };
+      save.disabled = true;
+      try {
+        await api("/api/agents/registry", { project: node.querySelector("#reg-proj").value.trim(), entry });
+        await poll();
+        if (node.isConnected) agentRegistryDialog();
+      } catch (err) {
+        msg.textContent = `Не сохранено: ${err.message}`;
+      } finally {
+        if (node.isConnected) save.disabled = false;
+      }
+    };
+  }, { wide: true });
+}
+
 const ACTIONS = {
   "task-new"() { taskMutationDialog("assign", null); },
   "task-context-roots"() { contextRootsDialog(); },
   "tasks-show-all"() { taskRenderLimit = Number.MAX_SAFE_INTEGER; renderTasks(); },
+  "agent-registry"() { agentRegistryDialog(); },
   "notify-settings"() { notifySettingsDialog(); },
   diagnostics() { diagnosticsDialog(); },
   async "quick-forward-assignment"(e) {
@@ -2044,6 +2172,7 @@ const ACTIONS = {
     const todoBtns = [];
     if (hasMsg) todoBtns.push(`<button data-action="copy-message" data-todo-id="${item.id}"${item.superseded_by ? " disabled" : ""}>Копировать</button>`);
     if (isTodo && !item.done_at && !item.superseded_by && item.kind === "forward" && !item.forwarded_at && !item.acked_at) todoBtns.push(`<button data-action="mark-forwarded" data-todo-id="${item.id}"${online ? "" : " disabled"}>Переслал</button>`);
+    if (isTodo && item.kind === "limit" && !item.done_at && isLocal && AD_HOST.kind !== "mobile") todoBtns.push(`<button data-action="rotate-limit-session" data-todo-id="${item.id}"${online ? "" : " disabled"}>Сменить сессию</button>`);
     if (isTodo && !item.done_at) todoBtns.push(`<button data-action="done-selected" data-todo-id="${item.id}"${online ? "" : " disabled"}>Закрыть</button>`);
     if (isTodo && item.done_at && !item.superseded_by) todoBtns.push(`<button data-action="reopen-todo" data-todo-id="${item.id}"${online ? "" : " disabled"}>Вернуть в очередь</button>`);
     dialog(`${isTodo ? `${cardLabel} — ` : ""}${item.agent} — ${item.project}`, `<dl class="kv">${head}</dl>${technicalDetails(item)}${msgBlock}${historyBlock}
@@ -2055,6 +2184,14 @@ const ACTIONS = {
         else { mb.textContent = "Загружаю сообщение…"; ensureFullTodo(item).then(() => { if (node.isConnected) mb.textContent = item.message || ""; }).catch(() => {}); }
       }
     }, { wide: true });
+  },
+  async "rotate-limit-session"(e) {
+    const button = e?.target?.closest("button");
+    const id = button?.dataset.todoId ? Number(button.dataset.todoId) : selected?.type === "todo" ? selected.id : null;
+    const todo = data.todos.find((t) => t.id === id);
+    if (!online || !todo) return;
+    closeDialog();
+    await act("/api/agents/rotate-session", { project: todo.project, agent: todo.agent, task_id: todo.task_id });
   },
   "reopen-todo"(e) {
     const button = e?.target?.closest("button");
@@ -2203,6 +2340,7 @@ document.addEventListener("click", (e) => {
     if (action === "details") taskDetails(task);
     else if (action === "context") fetchTaskContext(task);
     else if (action === "copy") copyTaskPrompt(task, taskAction);
+    else if (action === "launch") launchTaskAdapter(task);
     else if (action === "review") taskMutationDialog("transition", task, "accepted");
     else if (action === "release-resource") releaseResourceDialog(boundAgentForTask(task));
     else taskMutationDialog(action, task);

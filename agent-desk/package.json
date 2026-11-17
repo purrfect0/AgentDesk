@@ -34,6 +34,7 @@
       "core/peers.js",
       "core/sync.js",
       "core/tasks.js",
+      "core/adapters.js",
       "core/marker-schema.js",
       "core/mail.js",
       "core/agent-client.js",

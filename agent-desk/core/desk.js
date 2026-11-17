@@ -12,6 +12,7 @@ const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const { SyncJournal, stableId, UUID } = require("./sync.js");
 const { classifyRuntimeRejection, MARKER_TEMPLATES } = require("./marker-schema.js");
+const { AdapterRegistry } = require("./adapters.js");
 
 const VERSION = "2.3.3"; // the app version, the same as in package.json (a test checks it)
 const PROTOCOL = 3;
@@ -354,6 +355,8 @@ class Desk extends EventEmitter {
     this.lanOverride = o.lan;
     this.peers = new PeerLink(this, { discovery: o.discovery });
     this.sync = new SyncJournal(this);
+    this.adapters = new AdapterRegistry();
+    this._buildForwardText = forwardText;
     const { TaskService } = require("./tasks.js");
     const { MailStore } = require("./mail.js");
     this.tasks = new TaskService(this);
@@ -388,12 +391,14 @@ class Desk extends EventEmitter {
     this.config = {
       port: 8098, lan: true, notify: true, popup_sound: true, popup_volume: 80, stale_minutes: 90, autostart: true,
       retention_days: 0, watch: [{ path: path.join(this.dataDir, "markers"), project: "" }],
-      agents: {}, aliases: {}, allowed_hosts: [], file_sync_enabled: false,
+      agents: {}, aliases: {}, agent_registry: {}, external_adapters_enabled: false, resource_status_files: {},
+      allowed_hosts: [], file_sync_enabled: false,
       quiet_hours: { enabled: false, start: "23:00", end: "08:00" }, notify_projects: {},
       ...cfg,
     };
     const c = this.config;
     c.file_sync_enabled = c.file_sync_enabled === true;
+    c.external_adapters_enabled = c.external_adapters_enabled === true;
     const hhmmRe = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
     c.quiet_hours = {
       enabled: c.quiet_hours?.enabled === true,
@@ -412,6 +417,10 @@ class Desk extends EventEmitter {
     c.aliases = nameMap(c.aliases, false);
     c.allowed_hosts = (Array.isArray(c.allowed_hosts) ? c.allowed_hosts : []).map((h) => clean(h, 100).toLowerCase()).filter(Boolean);
     PeerLink.normalize(c); // device_id, device_name, peers (keys of each pair), peer_auto
+    c.agent_registry = this._normalizeRegistry(c.agent_registry, c.device_id);
+    c.resource_status_files = c.resource_status_files && typeof c.resource_status_files === "object" && !Array.isArray(c.resource_status_files)
+      ? Object.fromEntries(["phone", "server"].filter((k) => typeof c.resource_status_files[k] === "string" && path.isAbsolute(c.resource_status_files[k])).map((k) => [k, c.resource_status_files[k]]))
+      : {};
 
     this.state = {
       agents: {}, todos: [], events: [], seen_ids: [], alerts: [], rejected: [], next_id: 1, alert_seq: 0,
@@ -538,11 +547,260 @@ class Desk extends EventEmitter {
 
   // --- agents ---
 
+  _normalizeRegistry(raw, fallbackDevice = "") {
+    const out = {};
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+    for (const [projRaw, list] of Object.entries(raw).slice(0, 60)) {
+      const proj = oneLine(projRaw, 60);
+      if (!proj || !Array.isArray(list)) continue;
+      const seen = new Set();
+      const rows = [];
+      for (const item of list.slice(0, 60)) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+        const name = oneLine(item.name || item.agent, 60);
+        if (!name || seen.has(compact(name))) continue;
+        seen.add(compact(name));
+        const aliases = Array.isArray(item.aliases)
+          ? [...new Set(item.aliases.map((a) => oneLine(a, 60)).filter((a) => a && compact(a) !== compact(name)))].slice(0, 20)
+          : [];
+        // Capabilities are ONLY what was explicitly declared or verified — NEVER guessed from provider/model name.
+        const capabilities = Array.isArray(item.capabilities)
+          ? [...new Set(item.capabilities.map((cap) => oneLine(cap, 40)).filter(Boolean))].slice(0, 16)
+          : [];
+        const verifiedChannel = ["cli_or_mcp", "marker_folder", "manual", ""].includes(item.verified_channel) ? item.verified_channel : "";
+        const status = ["active", "paused", "archived"].includes(item.status) ? item.status : "active";
+        const deviceId = clean(item.device_id, 64) || fallbackDevice;
+        const sessionId = clean(item.session_id, 80);
+        const role = ["executor", "reviewer", "coordinator"].includes(item.role) ? item.role : "executor";
+        const adapter = clean(item.adapter, 40) || "manual";
+        rows.push({
+          name,
+          aliases,
+          capabilities,
+          verified_channel: verifiedChannel,
+          device_id: deviceId,
+          status,
+          session_id: sessionId,
+          role,
+          adapter,
+        });
+      }
+      if (rows.length) out[proj] = rows;
+    }
+    return out;
+  }
+
+  _syncRegistrySideEffects(proj, rows) {
+    this.config.agents[proj] ??= [];
+    this.config.aliases[proj] ??= {};
+    for (const r of rows) {
+      if (!this.config.agents[proj].some((n) => compact(n) === compact(r.name))) this.config.agents[proj].push(r.name);
+      for (const al of r.aliases) this.config.aliases[proj][al] = r.name;
+      if (r.session_id && r.device_id && r.status === "active") {
+        this.state.bindings ??= {};
+        const existing = Object.values(this.state.bindings).find((b) => b.project === proj && this._sameAgent(b.agent, r.name) && b.device_id === r.device_id && b.role === r.role);
+        const id = existing?.id || crypto.randomUUID();
+        this.state.bindings[id] = {
+          id,
+          project: proj,
+          agent: r.name,
+          role: r.role,
+          device_id: r.device_id,
+          session_id: r.session_id,
+          adapter: r.adapter,
+        };
+      }
+    }
+  }
+
+  agentRegistryStatus(project, agent) {
+    if (!project || !agent) return "active";
+    const list = this.config.agent_registry?.[project] || [];
+    const entry = list.find((r) => this._sameAgent(r.name, agent) || (r.aliases || []).some((al) => this._sameAgent(al, agent)));
+    return entry?.status || "active";
+  }
+
+  updateAgentRegistry(body, auth) {
+    if (!auth?.local) return { code: 403, body: { error: "реестр агентов настраивается только на ПК" } };
+    if (!body || typeof body !== "object" || Array.isArray(body)) return { code: 400, body: { error: "нужен объект" } };
+    const proj = oneLine(body.project, 60);
+    if (!proj) return { code: 400, body: { error: "нужен project" } };
+    const nextMap = { ...this.config.agent_registry };
+    if (Array.isArray(body.entries)) {
+      const norm = this._normalizeRegistry({ [proj]: body.entries }, this.config.device_id);
+      if (norm[proj]?.length) {
+        nextMap[proj] = norm[proj];
+        this._syncRegistrySideEffects(proj, norm[proj]);
+      } else {
+        delete nextMap[proj];
+      }
+    } else if (body.entry && typeof body.entry === "object") {
+      const cur = [...(nextMap[proj] || [])];
+      const normSingle = this._normalizeRegistry({ [proj]: [body.entry] }, this.config.device_id)[proj]?.[0];
+      if (!normSingle) return { code: 400, body: { error: "некорректная запись агента (нужно поле name)" } };
+      const idx = cur.findIndex((r) => this._sameAgent(r.name, normSingle.name));
+      if (idx >= 0) cur[idx] = { ...cur[idx], ...normSingle, verified_channel: normSingle.verified_channel || cur[idx].verified_channel || "" };
+      else cur.push(normSingle);
+      nextMap[proj] = cur;
+      this._syncRegistrySideEffects(proj, cur);
+    } else {
+      return { code: 400, body: { error: "нужны entries или entry" } };
+    }
+    this.config.agent_registry = nextMap;
+    this._saveConfig();
+    this._saveState();
+    this.emit("config", this.config);
+    this.emit("change");
+    return { body: { ok: true, project: proj, entries: nextMap[proj] || [] } };
+  }
+
+  rotateAgentSession(body, auth) {
+    if (!auth?.local) return { code: 403, body: { error: "смена сессии выполняется только на ведущем ПК" } };
+    const proj = oneLine(body?.project, 60);
+    const rawAgent = oneLine(body?.agent, 60);
+    if (!proj || !rawAgent) return { code: 400, body: { error: "нужны project и agent" } };
+    const agent = this.canonical(proj, rawAgent);
+    if (this.agentRegistryStatus(proj, agent) !== "active") {
+      return { code: 409, body: { error: `агент «${agent}» на паузе или в архиве; активируйте его перед сменой сессии` } };
+    }
+    const newSession = clean(body?.new_session_id, 80) || `rot-${crypto.randomBytes(8).toString("hex")}`;
+    const regList = [...(this.config.agent_registry?.[proj] || [])];
+    const regIdx = regList.findIndex((r) => this._sameAgent(r.name, agent));
+    const deviceId = clean(body?.device_id, 64) || regList[regIdx]?.device_id || this.config.device_id;
+    const role = regList[regIdx]?.role || "executor";
+    const adapter = regList[regIdx]?.adapter || "manual";
+    if (regIdx >= 0) regList[regIdx] = { ...regList[regIdx], session_id: newSession, device_id: deviceId };
+    else regList.push({ name: agent, aliases: [], capabilities: [], verified_channel: "", device_id: deviceId, status: "active", session_id: newSession, role, adapter });
+    this.config.agent_registry = { ...this.config.agent_registry, [proj]: regList };
+    this._syncRegistrySideEffects(proj, regList);
+
+    // Close open model_limit reminders for this agent in this project
+    const now = nowIso();
+    for (const t of this.state.todos) {
+      if (t.kind === "limit" && !t.done_at && t.project === proj && this._sameAgent(t.agent, agent)) {
+        this._close(t, now, true);
+        t.updated = now;
+      }
+    }
+
+    // Handoff target task (or active task of this agent in project) to the new session
+    let handedTask = null;
+    const targetTaskId = body?.task_id ? this._resolveTaskId(body.task_id) : null;
+    const candidate = targetTaskId
+      ? this.state.tasks?.[String(targetTaskId).toLowerCase()]
+      : Object.values(this.state.tasks || {}).find((t) => t.project === proj && this._sameAgent(t.assignment?.agent, agent) && ["assigned", "working", "blocked", "rework"].includes(t.state) && t.coordinator_device_id === this.config.device_id);
+    if (candidate) {
+      try {
+        handedTask = this.tasks.handoff({
+          task_id: candidate.task_id,
+          project: candidate.project,
+          project_id: candidate.project_id,
+          assignment_epoch: candidate.assignment.epoch,
+          agent,
+          device_id: deviceId,
+          session_id: newSession,
+          role: candidate.assignment.role || role,
+          adapter: candidate.assignment.adapter || adapter,
+        });
+      } catch (e) {
+        return { code: e.status || 409, body: { error: e.message } };
+      }
+    }
+    this._saveConfig();
+    this._saveState();
+    this.emit("config", this.config);
+    this.emit("change");
+    return { body: { ok: true, project: proj, agent, session_id: newSession, task: handedTask && this.tasks.enrich(handedTask) } };
+  }
+
+  resourceStatus() {
+    const out = {};
+    const nowMs = Date.now();
+    const staleSec = (Number(this.config.stale_minutes) || 20) * 60;
+    for (const kind of ["phone", "server"]) {
+      const waitingAgents = Object.values(this.state.agents || {})
+        .filter((a) => a.state === "waiting" && a.waiting_for === "resource" && (
+          kind === "phone" ? /телефон|phone|adb|apk/i.test(`${a.task || ""} ${a.note || ""}`) : /сервер|server|gpu|build|стенд/i.test(`${a.task || ""} ${a.note || ""}`) || !/телефон|phone|adb|apk/i.test(`${a.task || ""} ${a.note || ""}`)
+        ))
+        .map((a) => ({
+          project: a.project,
+          agent: a.agent,
+          task: a.task || "",
+          age_sec: a.updated ? Math.max(0, Math.round((nowMs - Date.parse(a.updated)) / 1000)) : null,
+        }));
+      const file = this.config.resource_status_files?.[kind];
+      if (file) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
+          const updatedAt = parsed?.updated_at || parsed?.time || null;
+          const freshnessSec = updatedAt && Number.isFinite(Date.parse(updatedAt))
+            ? Math.max(0, Math.round((nowMs - Date.parse(updatedAt)) / 1000))
+            : null;
+          const holder = oneLine(parsed?.holder || parsed?.owner || "", 80) || null;
+          out[kind] = {
+            resource: kind,
+            read_only: true,
+            status: holder ? "BUSY" : "FREE",
+            holder,
+            note: oneLine(parsed?.note || parsed?.task || "", 160),
+            source: "lease_file",
+            freshness_sec: freshnessSec,
+            stale: freshnessSec !== null ? freshnessSec > staleSec : null,
+            waiting_agents: waitingAgents,
+          };
+          continue;
+        } catch {
+          out[kind] = {
+            resource: kind,
+            read_only: true,
+            status: "UNKNOWN",
+            holder: null,
+            source: "lease_file_unavailable",
+            freshness_sec: null,
+            stale: null,
+            waiting_agents: waitingAgents,
+            reason: "Файл статуса ресурса недоступен или повреждён (только чтение).",
+          };
+          continue;
+        }
+      }
+      if (kind === "phone" && this.lastPhoneSeenAt) {
+        const ps = this.phoneStatus();
+        const freshnessSec = Math.max(0, Math.round((nowMs - Date.parse(this.lastPhoneSeenAt)) / 1000));
+        out.phone = {
+          resource: "phone",
+          read_only: true,
+          status: ps.connected ? "ONLINE_NO_LEASE" : "UNKNOWN",
+          holder: null,
+          source: "phone_poller_telemetry",
+          freshness_sec: freshnessSec,
+          stale: !ps.connected,
+          waiting_agents: waitingAgents,
+          reason: ps.connected ? "Телефон на связи с Desk; внешняя бронь ADB не подключена." : "Телефон отключён; статус брони неизвестен (UNKNOWN).",
+        };
+      } else {
+        out[kind] = {
+          resource: kind,
+          read_only: true,
+          status: "UNKNOWN",
+          holder: null,
+          source: waitingAgents.length ? "agent_markers_only" : "unconfigured",
+          freshness_sec: waitingAgents[0]?.age_sec ?? null,
+          stale: null,
+          waiting_agents: waitingAgents,
+          reason: "Источник брони не настроен; отображение только для чтения (UNKNOWN).",
+        };
+      }
+    }
+    return out;
+  }
+
   knownAgents(project) {
     const names = [];
     const add = (n) => {
       if (n && !names.some((x) => compact(x) === compact(n))) names.push(n);
     };
+    for (const r of this.config.agent_registry?.[project] || []) if (r.status !== "archived") add(r.name);
     for (const n of this.config.agents[project] || []) add(n);
     for (const n of this.config.agents["*"] || []) add(n);
     for (const a of Object.values(this.state.agents)) if (a.project === project) add(a.agent);
@@ -723,7 +981,7 @@ class Desk extends EventEmitter {
     return t;
   }
 
-  applyEvent(ev) {
+  applyEvent(ev, channel = "marker_folder") {
     const s = this.state;
     ev.agent = this.canonical(ev.project, ev.agent);
     if (ev.to) ev.to = this.canonical(ev.project, ev.to);
@@ -748,9 +1006,12 @@ class Desk extends EventEmitter {
     for (const k of ["state", "waiting_for", "phase", "task", "to", "from", "note", "result", "session", "seq"]) agent[k] = ev[k];
     agent.device_id = this.config.device_id;
     agent.task_id = ev.task_id;
+    agent.verified_channel = channel;
     agent.updated = ev.time;
     agent.received = ev.received;
     s.agents[key] = agent;
+    const regEntry = (this.config.agent_registry?.[ev.project] || []).find((r) => this._sameAgent(r.name, ev.agent));
+    if (regEntry && !regEntry.verified_channel) regEntry.verified_channel = channel;
 
     if (ev.state !== "waiting" && ev.state !== "blocked") {
       for (const t of s.todos) {
@@ -1221,6 +1482,8 @@ class Desk extends EventEmitter {
         acked: s.todos.filter((t) => t.acked_at).length,
       },
       phone_status: this.phoneStatus(),
+      resources: this.resourceStatus(),
+      adapters: this.adapters.probeAll(c),
       alert_seq: s.alert_seq,
       alerts: s.alerts.filter((a) => !a.suppressed).slice(-10),
       warnings: this.warnings.map((w) => ({ ...w, text: scrubWarn(w.text) })),
@@ -1229,7 +1492,9 @@ class Desk extends EventEmitter {
         stale_minutes: c.stale_minutes, notify: c.notify, quiet_hours: c.quiet_hours, notify_projects: c.notify_projects,
         watch: localOwner ? c.watch : c.watch.map((w) => ({ project: w.project })),
         lan: c.lan, popup_sound: c.popup_sound,
-        popup_volume: c.popup_volume, autostart: c.autostart, retention_days: c.retention_days, agents: c.agents, aliases: c.aliases,
+        popup_volume: c.popup_volume, autostart: c.autostart, retention_days: c.retention_days,
+        agents: c.agents, aliases: c.aliases, agent_registry: c.agent_registry || {},
+        external_adapters_enabled: Boolean(c.external_adapters_enabled),
         task_repo_roots: localOwner ? (c.task_repo_roots || []) : [],
         task_skill_roots: localOwner ? (c.task_skill_roots || []) : [],
         file_sync_enabled: this.fileSyncEnabled,
@@ -1615,9 +1880,18 @@ class Desk extends EventEmitter {
         return this._waitAlerts(res, url, cors);
       }
       if (url.pathname === "/api/diagnostics") return this._send(res, 200, this.diagnosticsExport(), cors);
+      if (url.pathname === "/api/resources") return this._send(res, 200, this.resourceStatus(), cors);
+      if (url.pathname === "/api/adapters/probe") {
+        const id = url.searchParams.get("adapter");
+        return this._send(res, 200, id ? this.adapters.probe(id, this.config) : { adapters: this.adapters.probeAll(this.config) }, cors);
+      }
       if (url.pathname === "/api/mail") return this._send(res, 200, this.mailPayload(auth), cors);
       if (url.pathname === "/api/tasks/context") {
         try { return this._send(res, 200, this._scopedContext(url.searchParams.get("id"), auth), cors); }
+        catch (e) { return this._send(res, e.status || 400, { error: e.message }, cors); }
+      }
+      if (url.pathname === "/api/tasks/handoff-json") {
+        try { return this._send(res, 200, this.tasks.handoffPackage(this._resolveTaskId(url.searchParams.get("id")), auth), cors); }
         catch (e) { return this._send(res, e.status || 400, { error: e.message }, cors); }
       }
       if (url.pathname === "/api/reconcile") {
@@ -1762,7 +2036,7 @@ class Desk extends EventEmitter {
           const ev = parseMarker(JSON.stringify(body), body.project);
           ev.event_id ||= crypto.randomUUID();
           if (this.seen.has(ev.event_id)) return this._send(res, 200, { ok: true, event_id: ev.event_id, duplicate: true }, cors);
-          this.applyEvent(ev); this._remember(ev.event_id); this._saveState(); this.emit("change");
+          this.applyEvent(ev, "cli_or_mcp"); this._remember(ev.event_id); this._saveState(); this.emit("change");
           const todo = this.state.todos.findLast(t => t.task_id === ev.task_id);
           return this._send(res, 200, { ok: true, event_id: ev.event_id, task_id: ev.task_id, message_id: todo?.message_id }, cors);
         }
@@ -1774,11 +2048,14 @@ class Desk extends EventEmitter {
   _post(pathname, body, auth) {
     if (pathname.startsWith("/api/tasks/")) {
       const action = pathname.slice("/api/tasks/".length);
-      if (!["assign", "transition", "handoff", "coordinate"].includes(action)) return { code: 404, body: { error: "not found" } };
+      if (!["assign", "transition", "handoff", "coordinate", "launch"].includes(action)) return { code: 404, body: { error: "not found" } };
+      if (action === "launch" && !auth.local) return { code: 403, body: { error: "запуск адаптера выполняется только локально на ведущем ПК" } };
       if (action === "assign" && !body.task_id && !body.id && body.project && !body.project_id) body.project_id = this._projectIdentity(body.project);
       try { return { body: this.tasks[action](body) }; }
       catch (e) { return { code: e.status || 400, body: { error: e.message } }; }
     }
+    if (pathname === "/api/agents/registry") return this.updateAgentRegistry(body, auth);
+    if (pathname === "/api/agents/rotate-session") return this.rotateAgentSession(body, auth);
     if (pathname === "/api/mail/config") {
       if (!auth.local) return { code: 403, body: { error: "синхронизация файлов настраивается только на ПК" } };
       if (Object.hasOwn(body, "enabled") && typeof body.enabled !== "boolean") return { code: 400, body: { error: "enabled должен быть true или false" } };
@@ -1870,7 +2147,7 @@ class Desk extends EventEmitter {
 
   _updateConfig(body, auth) {
     const c = this.config;
-    const admin = ["watch", "lan", "autostart", "agents", "aliases", "allowed_hosts", "retention_days", "task_repo_roots", "task_skill_roots"].filter((k) => k in body);
+    const admin = ["watch", "lan", "autostart", "agents", "aliases", "agent_registry", "external_adapters_enabled", "resource_status_files", "allowed_hosts", "retention_days", "task_repo_roots", "task_skill_roots"].filter((k) => k in body);
     if (admin.length && !auth.local) return { code: 403, body: { error: `эти настройки меняются только на ПК: ${admin.join(", ")}` } };
     let watch = null;
     if ("watch" in body) {
@@ -1917,6 +2194,11 @@ class Desk extends EventEmitter {
     }
     if ("agents" in body) c.agents = nameMap(body.agents, true);
     if ("aliases" in body) c.aliases = nameMap(body.aliases, false);
+    if ("agent_registry" in body) c.agent_registry = this._normalizeRegistry(body.agent_registry, c.device_id);
+    if (typeof body.external_adapters_enabled === "boolean") c.external_adapters_enabled = body.external_adapters_enabled;
+    if (body.resource_status_files && typeof body.resource_status_files === "object" && !Array.isArray(body.resource_status_files)) {
+      c.resource_status_files = Object.fromEntries(["phone", "server"].filter((k) => typeof body.resource_status_files[k] === "string" && path.isAbsolute(body.resource_status_files[k])).map((k) => [k, body.resource_status_files[k]]));
+    }
     if (Array.isArray(body.allowed_hosts)) c.allowed_hosts = body.allowed_hosts.map((h) => clean(h, 100).toLowerCase()).filter(Boolean).slice(0, 20);
     this._saveConfig();
     this._bump();

@@ -721,4 +721,55 @@ if (process.argv.includes("--serve")) {
     assert.equal(exported.redacted, true);
     assert.equal(exported.rejected_by_field.waiting_for, 6);
   });
+
+  test("CP4 UI: agent registry, read-only resources, JSON handoff/handback export, mock-dry-run launch button and limit session rotation", async () => {
+    const state = fixture();
+    state.resources = {
+      phone: { resource: "phone", read_only: true, status: "UNKNOWN", holder: null, source: "unconfigured", freshness_sec: null },
+      server: { resource: "server", read_only: true, status: "BUSY", holder: "Opus (2)", source: "lease_file", freshness_sec: 12 },
+    };
+    state.adapters = [
+      { adapter: "manual", mode: "manual", available: true, reason: "Ручной режим" },
+      { adapter: "mock-dry-run", mode: "dry_run_mock", available: true, reason: "Локальный mock" },
+      { adapter: "external-account", mode: "external", available: false, reason: "Отключено по умолчанию" },
+    ];
+    state.config.agent_registry = {
+      Demo: [{ name: "Claude Opus", aliases: ["опус"], capabilities: [], verified_channel: "cli_or_mcp", device_id: "fixture-pc", status: "active", session_id: "s-1" }],
+    };
+    state.tasks[0].state = "assigned";
+    state.tasks[0].assignment.adapter = "mock-dry-run";
+    state.todos.push({ id: 50, display_id: "AD-50", message_id: "50505050-5050-4050-8050-505050505050", project: "Demo", agent: "Claude Opus", kind: "limit", message: "Лимит", created: new Date().toISOString() });
+
+    const calls = [];
+    const h = harness(state);
+    h.ctx.__api = async (url, body) => {
+      calls.push({ url, body });
+      if (url.startsWith("/api/tasks/handoff-json")) return { schema: "agent-desk.handoff.v1", handback_template: { state: "done", execution_state: "submitted" } };
+      if (url === "/api/tasks/launch") return { receipt: { adapter: "mock-dry-run", status: "dispatched_dry_run", reason: "Отправлено в mock" } };
+      return { ok: true };
+    };
+    h.run('api = __api; copyText = async (t) => { globalThis.__cp4Copied = t; return true; }; renderTasks()');
+    const cardDom = inspectDom(h.root.querySelector("#task-list").innerHTML);
+    assert.ok(cardDom.byAction("launch"), "mock-dry-run assigned task exposes explicit launch button");
+
+    h.run('ACTIONS["agent-registry"]()');
+    const regHtml = h.mounted.at(-1).html;
+    assert.match(regHtml, /UNKNOWN/);
+    assert.match(regHtml, /BUSY/);
+    assert.match(regHtml, /Opus \(2\)/);
+    assert.match(regHtml, /возможности не заявлены \(не угадываются\)/);
+    assert.match(regHtml, /cli_or_mcp/);
+
+    h.run('contextDialog(data.tasks[0], { text: "CTX", checks: {} })');
+    const ctxNode = h.mounted.at(-1).node;
+    await ctxNode.querySelector("#copy-handoff-json").onclick();
+    assert.equal(JSON.parse(h.run("__cp4Copied")).schema, "agent-desk.handoff.v1");
+    await ctxNode.querySelector("#copy-handback-tpl").onclick();
+    assert.equal(JSON.parse(h.run("__cp4Copied")).execution_state, "submitted");
+
+    h.run('selected = { type: "todo", id: 50 }; ACTIONS.details()');
+    assert.match(h.mounted.at(-1).html, /data-action="rotate-limit-session"/);
+    await h.run('ACTIONS["rotate-limit-session"]()');
+    assert.ok(calls.some((c) => c.url === "/api/agents/rotate-session" && c.body.agent === "Claude Opus"));
+  });
 }
