@@ -13,6 +13,7 @@ const HELP = {
     "Hyphenated field flags map to snake_case. --checkpoint, --artifacts, --assignment, --binding, --manifest, --constraints, --skills and --ack accept JSON.",
     "--needs-forward [true|false] is boolean; --seq and --assignment-epoch are integers. --timeout is milliseconds.",
     "Errors are JSON on stdout with a nonzero exit code. ACK is a receipt, not task acceptance/completion.",
+    "assign accepts --prompt (max 20000 characters) or JSON prompt/message. Use --file or --stdin for multiline text. Read the returned assignment_message_id to copy or resend without reassigning.",
     "The agent key is read only from config.json; no --key option and no state.json writes.",
   ],
 };
@@ -20,7 +21,7 @@ const GLOBALS = new Set(["home", "server", "file", "json", "timeout"]);
 const FIELDS = new Set([
   "id", "project", "project_id", "agent", "session_id", "message_id", "task_id", "event_id", "seq",
   "state", "execution_state", "assignment_epoch", "epoch", "previous_session_id", "previous_device_id", "device_id", "origin_device_id", "delivery_target", "role", "adapter",
-  "title", "task", "to", "from", "phase", "waiting_for", "note", "result", "message", "ref", "needs_forward", "ack",
+  "title", "task", "prompt", "to", "from", "phase", "waiting_for", "note", "result", "message", "ref", "needs_forward", "ack",
   "checkpoint", "artifacts", "assignment", "binding", "repo", "branch", "commit", "report", "manifest", "next_step", "constraints", "skills",
 ]);
 const JSON_FIELDS = new Set(["checkpoint", "artifacts", "assignment", "binding", "manifest", "constraints", "skills"]);

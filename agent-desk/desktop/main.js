@@ -175,7 +175,7 @@ function rebuildTrayMenu() {
 
 function updateTray() {
   if (!tray) return;
-  const open = desk.state.todos.filter((t) => !t.done_at && !t.quiet && !["receipt", "ack", "delivery"].includes(t.kind) && !(t.kind === "forward" && (t.forwarded_at || t.acked_at || (t.delivery_target && t.delivery_target !== desk.config.device_id)))).length;
+  const open = desk.state.todos.filter((t) => !t.done_at && !t.superseded_by && !t.quiet && !["receipt", "ack", "delivery"].includes(t.kind) && !(t.kind === "forward" && (t.forwarded_at || t.acked_at || (t.delivery_target && t.delivery_target !== desk.config.device_id)))).length;
   tray.setToolTip(open ? `${TITLE} — нужно сделать: ${open}` : `${TITLE} — всё под контролем`);
 }
 

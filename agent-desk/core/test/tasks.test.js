@@ -76,6 +76,63 @@ test("owner assignment generates UUID task/project/binding and saves before emit
   assert.equal(task.checkpoint.repo, undefined);
 });
 
+test("assignment creates one forwardable prompt per epoch and preserves old receipts on handoff", () => {
+  const { desk, service } = fixture();
+  desk.state.next_id = 1;
+  const prompt = "Проверь поиск.\nСохрани переносы строк и полный текст задания.";
+  const task = assigned(service, { prompt });
+  assert.equal(desk.state.todos.length, 1);
+  const message = desk.state.todos[0];
+  assert.equal(message.message, prompt);
+  assert.equal(message.task_id, task.task_id);
+  assert.equal(message.assignment_epoch, 1);
+  assert.equal(message.to, "Worker");
+  assert.equal(message.recipient_session_id, "session-a");
+  assert.equal(task.assignment_message_id, message.message_id);
+  assert.equal(message.forwarded_at, null);
+  message.forwarded_at = "forwarded";
+  message.acked_at = "received";
+  service.transition({ ...reporter(task), state: "working" });
+  assert.equal(desk.state.todos.length, 1);
+  const next = service.handoff({ task_id: task.task_id, assignment_epoch: 1, agent: "Other", session_id: "session-b" });
+  assert.equal(desk.state.todos.length, 2);
+  assert.equal(desk.state.todos[0].acked_at, "received");
+  assert.equal(desk.state.todos[0].forwarded_at, "forwarded");
+  assert.notEqual(next.assignment_message_id, message.message_id);
+  assert.equal(desk.state.todos[1].assignment_epoch, 2);
+  assert.equal(desk.state.todos[1].message, prompt);
+  assert.ok(service.context(next.task_id).text.includes(prompt));
+});
+
+test("failed assignment save rolls back task, binding and owner reminder together", () => {
+  const { desk, service } = fixture();
+  desk.state.next_id = 1;
+  const before = structuredClone(desk.state);
+  desk._saveState = () => { throw new Error("synthetic disk full"); };
+  assert.throws(() => assigned(service, { prompt: "Full assignment" }), /disk full/);
+  assert.deepEqual(desk.state, before);
+});
+
+test("empty prompt does not fail assign and clears inherited prompt on handoff", () => {
+  const { desk, service } = fixture();
+  const blank = assigned(service, { title: "Blank", prompt: "" });
+  assert.equal(blank.prompt, undefined);
+  const first = assigned(service, { title: "Handoff", prompt: "Worker instructions" });
+  assert.equal(first.prompt, "Worker instructions");
+  const next = service.handoff({ task_id: first.task_id, assignment_epoch: 1, agent: "Reviewer", session_id: "review-a", prompt: "" });
+  assert.equal(next.prompt, undefined);
+  const msg = desk.state.todos.find(t => t.message_id === next.assignment_message_id);
+  assert.doesNotMatch(msg.message, /Worker instructions/);
+});
+
+test("ordinary reports never recreate a pruned assignment message", () => {
+  const { desk, service } = fixture();
+  const task = assigned(service);
+  desk.state.todos = [];
+  service.transition({ ...reporter(task), state: "assigned" });
+  assert.equal(desk.state.todos.length, 0);
+});
+
 test("list filters and get return detached snapshots; project identities are reused", () => {
   const { service } = fixture();
   const first = assigned(service);

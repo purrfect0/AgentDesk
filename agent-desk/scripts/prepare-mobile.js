@@ -8,7 +8,7 @@ const path = require("node:path");
 const ROOT = path.join(__dirname, "..");
 const WEB = path.join(ROOT, "web");
 const WWW = path.join(ROOT, "mobile", "www");
-const SKIP = new Set(["popup.html", "popup.js"]);
+const SKIP = new Set(["popup.html", "popup.js", "linked-ui.test.js"]);
 
 for (const need of ["vendor/98.css", "icons/world-0.png"]) {
   if (!fs.existsSync(path.join(WEB, need))) {

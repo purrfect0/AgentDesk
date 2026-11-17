@@ -323,6 +323,45 @@ test("MCP missing dependency is a nonzero startup error on stderr only", { skip:
   assert.ok(!result.stderr.includes(KEY));
 });
 
+test("CLI and MCP assign, read and ACK against an isolated real Desk", { skip: !sdkAvailable && "official MCP SDK not installed" }, async (t) => {
+  const { Desk } = require("../desk.js");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "agent-desk-real-api-"));
+  const desk = new Desk({ dataDir: home, legacyDir: null, port: 0, lan: false, discovery: false, log() {} });
+  desk.config.watch = [];
+  await desk.start(); desk.peers.stop(); desk.config.port = desk.boundPort; desk._saveConfig();
+  t.after(async () => { await desk.stop(); fs.rmSync(home, { recursive: true, force: true }); });
+  const prompt = "Проверь поиск задания.\nНе потеряй последнюю строку.";
+  const result = await command(CLI, ["assign", "--project=P", "--title=CLI assignment", "--agent=Worker", "--session-id=cli-session", "--prompt", prompt], home);
+  assert.equal(result.code, 0, result.stdout);
+  const cliTask = json(result);
+  assert.equal(desk.state.todos.length, 1);
+  const read = await command(CLI, ["read", cliTask.assignment_message_id], home);
+  assert.equal(read.code, 0, read.stdout);
+  assert.ok(json(read).todo.forward_text.includes(prompt));
+  assert.equal(desk.state.todos[0].forwarded_at, null);
+  const { Client } = require("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = require("@modelcontextprotocol/sdk/client/stdio.js");
+  const transport = new StdioClientTransport({ command: process.execPath, args: [MCP, "--home", home], env: { ...process.env, AGENT_DESK_HOME: home }, stderr: "pipe" });
+  const client = new Client({ name: "assignment-contract", version: "1.0.0" }, { capabilities: {} });
+  try {
+    await client.connect(transport);
+    const assigned = await client.callTool({ name: "agent_desk_assign", arguments: { project: "P", title: "MCP assignment", agent: "Worker", session_id: "mcp-session", prompt } });
+    assert.equal(assigned.isError, undefined, JSON.stringify(assigned));
+    const task = assigned.structuredContent;
+    assert.equal(desk.state.todos.length, 2);
+    const listed = await client.callTool({ name: "agent_desk_inbox", arguments: { project: "P", agent: "Worker", session_id: "mcp-session" } });
+    assert.equal(listed.structuredContent.todos.length, 1);
+    assert.equal(listed.structuredContent.todos[0].message_id, task.assignment_message_id);
+    const ack = await client.callTool({ name: "agent_desk_ack", arguments: { project: "P", agent: "Worker", session_id: "mcp-session", message_id: task.assignment_message_id, assignment_epoch: 1 } });
+    assert.equal(ack.isError, undefined, JSON.stringify(ack));
+    assert.ok(desk.state.todos.find(row => row.message_id === task.assignment_message_id).acked_at);
+    assert.equal(desk.state.tasks[task.task_id].state, "assigned");
+    const bad = await client.callTool({ name: "agent_desk_submit", arguments: { project: "P", agent: "Worker", state: "done", message: "x".repeat(20001) } });
+    assert.equal(bad.isError, true);
+    assert.equal(desk.state.todos.length, 2);
+  } finally { await client.close(); }
+});
+
 test("official SDK stdio list/call smoke with only synthetic loopback HTTP", { skip: !sdkAvailable && "official MCP SDK not installed; parent must install and rerun" }, async (t) => {
   const { home, calls } = await fixture(t);
   const { Client } = require("@modelcontextprotocol/sdk/client/index.js");

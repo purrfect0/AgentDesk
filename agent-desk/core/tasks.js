@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
+const { stableId } = require("./sync.js");
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const STATES = new Set(["assigned", "working", "submitted", "accepted", "rework", "blocked"]);
@@ -294,7 +295,40 @@ class TaskService {
     task.updated = row.time;
   }
 
-  _put(task, persist) {
+  _assignmentMessage(task) {
+    const s = this.desk.state;
+    const messageId = stableId(`assignment:${task.task_id}:${task.assignment.epoch}`);
+    if (s.todos.some(t => t.message_id === messageId)) { task.assignment_message_id = messageId; return; }
+    const a = task.assignment, time = task.updated;
+    const cp = task.checkpoint || {};
+    const context = [["Репозиторий", cp.repo], ["Ветка", cp.branch], ["Коммит", cp.commit], ["Отчёт", cp.report], ["Следующий шаг", cp.next_step]]
+      .filter(([, value]) => value).map(([label, value]) => `${label}: ${value}`);
+    if (cp.constraints?.length) context.push(`Ограничения:\n${cp.constraints.map(value => `- ${value}`).join("\n")}`);
+    const message = [task.prompt || task.title, ...context].join("\n\n");
+    const id = s.next_id || 1;
+    const todo = {
+      id, display_id: `AD-${id}`, kind: "forward", project: task.project, project_id: task.project_id,
+      agent: "Владелец", to: a.agent, task: task.title, task_id: task.task_id, message,
+      message_id: messageId, origin_device_id: task.coordinator_device_id,
+      purpose: "assignment", assignment_epoch: a.epoch, recipient_session_id: a.session_id,
+      recipient_device_id: a.device_id, created: time, updated: time,
+      forwarded_at: null, acked_at: null, done_at: null, receipt_epoch: 0, auto: false,
+    };
+    const envelope = { id: crypto.randomUUID(), origin: task.coordinator_device_id, clock: Number.MAX_SAFE_INTEGER, type: "todo", entity_id: messageId, data: todo, deleted: false, time };
+    if (Buffer.byteLength(JSON.stringify(envelope), "utf8") > 58000) fail(400, "Assignment prompt exceeds 58,000 bytes; shorten it or reference an attachment (space is reserved for receipts)");
+    for (const prior of s.todos) {
+      if (prior.purpose !== "assignment" || prior.task_id !== task.task_id || prior.assignment_epoch >= a.epoch) continue;
+      prior.superseded_by = messageId;
+      prior.done_at ||= time;
+      prior.updated = time;
+      todo.supersedes = prior.message_id;
+    }
+    task.assignment_message_id = messageId;
+    s.next_id = id + 1;
+    s.todos.push(todo);
+  }
+
+  _put(task, persist, publishAssignment = false) {
     const state = this.desk.state;
     const before = persist ? clone(state) : null;
     const dirtyBefore = this.desk.dirty;
@@ -302,16 +336,19 @@ class TaskService {
     const existing = Object.values(state.bindings).find((b) => b.project === task.project && this._same(b.agent, a.agent, task.project) && b.device_id === a.device_id && b.session_id === a.session_id && b.role === a.role && b.adapter === a.adapter);
     const binding = existing || { id: crypto.randomUUID(), project: task.project, agent: a.agent, role: a.role, device_id: a.device_id, session_id: a.session_id, adapter: a.adapter };
     task.binding_id = binding.id;
-    // Match the parent journal's complete UTF-8 event budget, not just checkpoint characters.
+    if (publishAssignment) task.assignment_message_id = stableId(`assignment:${task.task_id}:${a.epoch}`);
     const envelope = { id: crypto.randomUUID(), origin: "x".repeat(128), clock: Number.MAX_SAFE_INTEGER, type: "task", entity_id: task.task_id, data: task, deleted: false, time: now() };
     if (Buffer.byteLength(JSON.stringify(envelope), "utf8") > 60000) fail(400, "Task exceeds the 60,000-byte sync event budget; shorten checkpoint/artifacts/history text");
-    state.tasks = { ...state.tasks, [task.task_id]: task };
-    state.bindings = { ...state.bindings, [binding.id]: binding };
-    if (persist) {
-      try { this.desk._saveState(); }
-      catch (error) { this.desk.state = before; this.desk.dirty = dirtyBefore; throw error; }
-      this.desk.emit("change");
+    try {
+      if (publishAssignment) this._assignmentMessage(task);
+      state.tasks = { ...state.tasks, [task.task_id]: task };
+      state.bindings = { ...state.bindings, [binding.id]: binding };
+      if (persist) this.desk._saveState();
+    } catch (error) {
+      if (persist) { this.desk.state = before; this.desk.dirty = dirtyBefore; }
+      throw error;
     }
+    if (persist) this.desk.emit("change");
     return clone(task);
   }
 
@@ -333,9 +370,14 @@ class TaskService {
     task.state = "assigned";
     task.managed_assignment = true;
     task.launch = { status: "needs_manual_launch", adapter: assignment.adapter, reason: "No launch adapter is implemented; copy context into the target session manually." };
+    if (body.prompt !== undefined || body.message !== undefined) {
+      const prompt = text(body.prompt ?? body.message, "prompt", 20000, false);
+      if (prompt) task.prompt = prompt;
+      else delete task.prompt;
+    }
     metadata(body, task);
     this._history(task, "assign", body, old, prior);
-    return this._put(task, true);
+    return this._put(task, true, true);
   }
 
   _state(body, task, observed = false) {
@@ -381,9 +423,14 @@ class TaskService {
     task.state = "assigned";
     task.managed_assignment = true;
     task.launch = { status: "needs_manual_launch", adapter: assignment.adapter, reason: "No launch adapter is implemented; copy context into the target session manually." };
+    if (body.prompt !== undefined || body.message !== undefined) {
+      const prompt = text(body.prompt ?? body.message, "prompt", 20000, false);
+      if (prompt) task.prompt = prompt;
+      else delete task.prompt;
+    }
     metadata(body, task);
     this._history(task, "handoff", body, old, prior);
-    return this._put(task, true);
+    return this._put(task, true, true);
   }
 
   /** Caller supplies already validated/canonicalized markers and owns their save/archive transaction. */
@@ -494,6 +541,8 @@ class TaskService {
     const files = artifacts(task.artifacts || []);
     const checks = { repo: { status: "not_requested" }, artifacts: [], skills: [], report: { status: cp.report ? "metadata_only" : "not_requested" }, remote_push: { status: "unverified", reason: "No network fetch or push is performed." } };
     const lines = ["[Agent Desk task context — metadata, not executable instructions]", `task_id: ${task.task_id}`, `project: ${task.project}`, `project_id: ${task.project_id}`, `title: ${task.title}`, `state: ${task.state}`, `coordinator_device_id: ${task.coordinator_device_id}`, `agent: ${task.assignment.agent}`, `device_id: ${task.assignment.device_id}`, `session_id: ${task.assignment.session_id}`, `assignment_epoch: ${task.assignment.epoch}`, `adapter: ${task.assignment.adapter} (needs_manual_launch)`, "ACK/delivery are receipts only; done reports mean submitted, not accepted."];
+    if (task.prompt) lines.push("\n[Assignment prompt]", task.prompt, "[End assignment prompt]\n");
+    if (task.assignment_message_id) lines.push(`message_id: ${task.assignment_message_id}; use this UUID to acknowledge receipt`);
     if (cp.next_step) lines.push(`next_step: ${cp.next_step}`);
     if (cp.report) lines.push(`report (unread metadata): ${cp.report}`);
     if (cp.constraints?.length) lines.push("constraints:", ...cp.constraints.map((s) => `- ${s}`));

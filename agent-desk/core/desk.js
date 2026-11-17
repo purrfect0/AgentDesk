@@ -12,7 +12,7 @@ const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const { SyncJournal, stableId, UUID } = require("./sync.js");
 
-const VERSION = "2.3.2"; // the app version, the same as in package.json (a test checks it)
+const VERSION = "2.3.3"; // the app version, the same as in package.json (a test checks it)
 const PROTOCOL = 3;
 const STATES = new Set(["working", "waiting", "done", "blocked", "idle"]);
 const WAITING_FOR = new Set([
@@ -152,6 +152,11 @@ function parseMarker(text, folderProject, now = Date.now()) {
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("маркер должен быть JSON-объектом");
   // Other JSON files in the folder (package.json, settings…) are not touched.
   if (!("agent" in data) && !("state" in data)) throw new NotAMarker("not a marker");
+  for (const [field, limit] of [["message", 20000], ["note", 1000], ["result", 400], ["task", 500]]) {
+    if (data[field] !== undefined && data[field] !== null && (typeof data[field] !== "string" || data[field].length > limit)) {
+      throw new Error(`${field}: максимум ${limit} символов; текст не принят, сократите его или передайте файл отдельно`);
+    }
+  }
   const n = Number(data.seq);
   const seq = data.seq === undefined || data.seq === null || data.seq === "" || !Number.isSafeInteger(n) ? null : n;
   const received = new Date(now).toISOString();
@@ -225,7 +230,8 @@ function forwardText(t) {
   if (t.kind !== "forward") return t.message;
   const head = `[Agent Desk] от: ${t.agent} → ${t.to} · проект: ${t.project}${t.task ? ` · задача: ${t.task}` : ""}`;
   const update = t.supersedes ? `\n(обновлённая версия, заменяет ${t.supersedes})` : "";
-  return `${head}${update}\n\n${t.message}\n\n[Agent Desk] message_id: ${t.message_id}. `
+  const assignment = t.purpose === "assignment" ? `\n[Agent Desk] task_id: ${t.task_id}; assignment_epoch: ${t.assignment_epoch}; session_id: ${t.recipient_session_id}; device_id: ${t.recipient_device_id}. Сохраняй эти поля в отчётах по заданию.` : "";
+  return `${head}${update}\n\n${t.message}${assignment}\n\n[Agent Desk] message_id: ${t.message_id}. `
     + `Начав работу по этому сообщению, укажи в маркере "ack": "${t.message_id}".`;
 }
 
@@ -343,6 +349,13 @@ class Desk extends EventEmitter {
     }
     this.mail = new MailStore(this);
     this._numberTaskCards();
+    for (const task of Object.values(this.state.tasks)) {
+      if (task.managed_assignment && task.state === "assigned" && task.coordinator_device_id === this.config.device_id
+          && !task.assignment_message_id && !this.state.todos.some(t => t.task_id === task.task_id)) {
+        try { this.tasks._assignmentMessage(task); }
+        catch (error) { this.warnings.push({ time: nowIso(), level: "error", text: `${this.state.task_card_ids[task.task_id]}: не удалось подготовить промпт для пересылки. Откройте контекст задачи. ${error.message}` }); }
+      }
+    }
   }
 
   _load() {
@@ -444,7 +457,7 @@ class Desk extends EventEmitter {
     const tasks = Object.values(s.tasks || {}).sort((a, b) => String(a.created || "").localeCompare(String(b.created || "")) || a.task_id.localeCompare(b.task_id));
     for (const task of tasks) {
       if (s.task_card_ids[task.task_id]) continue;
-      const rows = s.todos.filter(t => t.task_id === task.task_id).sort((a, b) => a.id - b.id);
+      const rows = s.todos.filter(t => t.task_id === task.task_id && t.purpose !== "assignment").sort((a, b) => a.id - b.id);
       const linked = rows.map(t => t.display_id || `AD-${t.id}`).find(label => !used.has(label));
       let label = linked;
       if (!label) {
@@ -594,13 +607,25 @@ class Desk extends EventEmitter {
     return added;
   }
 
+  _ackError(t, ev) {
+    if (t.superseded_by) return "Сообщение заменено; получите текущую версию задания";
+    const task = t.task_id && this.state.tasks?.[t.task_id];
+    if (t.purpose === "assignment") {
+      if (!task || t.assignment_epoch !== task.assignment.epoch) return "Назначение изменилось; получите текущую версию задания";
+      if (t.recipient_device_id !== this.config.device_id) return "ACK нужно отправить с компьютера получателя";
+      if (ev.assignment_epoch !== undefined && ev.assignment_epoch !== t.assignment_epoch) return "ACK относится к прежнему назначению";
+    }
+    const sameAssignee = task && this._sameAgent(t.to, task.assignment.agent);
+    const session = t.recipient_session_id || (sameAssignee ? task.assignment.session_id : "");
+    if (session && session !== ev.session) return "ACK из другой сессии получателя";
+    return "";
+  }
+
   _acknowledge(ev) {
     let count = 0;
     for (const t of this.state.todos) {
       if (t.kind !== "forward" || t.acked_at || t.project !== ev.project || !this._sameAgent(t.to, ev.agent)) continue;
-      const task = t.task_id && this.state.tasks?.[t.task_id];
-      const session = task?.assignment?.session_id;
-      if (session && session !== ev.session) continue;
+      if (this._ackError(t, ev)) continue;
       if (ev.task_id && t.task_id && ev.task_id !== t.task_id) continue;
       // Legacy display IDs are accepted only for unambiguous messages created on this desk.
       const localLegacy = t.origin_device_id === this.config.device_id && !t.from_device
@@ -657,7 +682,8 @@ class Desk extends EventEmitter {
     this._acknowledge(ev);
     ev.device_id = this.config.device_id;
     ev.project_id ||= this._projectIdentity(ev.project, ev.task_id);
-    const task = this.tasks?.observe(ev);
+    const receiptOnly = ev.state === "idle" && ev.ack.length && !ev.execution_state && !ev.checkpoint && !ev.artifacts && !ev.task && !ev.to && !ev.message;
+    const task = receiptOnly ? null : this.tasks?.observe(ev);
     if (task?.task_id) ev.task_id = task.task_id;
     for (const k of ["state", "waiting_for", "phase", "task", "to", "from", "note", "result", "session", "seq"]) agent[k] = ev[k];
     agent.device_id = this.config.device_id;
@@ -681,14 +707,14 @@ class Desk extends EventEmitter {
       const message = ev.message || defaultMessage(ev);
       const existing = s.todos.find((t) => !t.done_at && t.kind === kind && t.project === ev.project && this._sameAgent(t.agent, ev.agent)
         && (kind !== "forward" || (t.task === ev.task && this._sameAgent(t.to, ev.to))));
-      if (existing && !(kind === "forward" && existing.forwarded_at)) {
+      if (existing && (kind !== "forward" || existing.message === message)) {
         const changed = existing.message !== message;
         Object.assign(existing, { note: ev.note, result: ev.result, waiting_for: ev.waiting_for, message, updated: ev.received });
         if (ev.ref) existing.ref = ev.ref;
         todo = existing;
         if (changed) alertTitle = "updated";
       } else if (existing) {
-        // Already forwarded: a changed result must reach the addressee again.
+        // A copied prompt may already be in a chat even without a manual forwarding receipt.
         if (existing.message !== message) {
           todo = this._newTodo(kind, ev, message, { supersedes: existing.message_id });
           existing.superseded_by = todo.message_id;
@@ -701,6 +727,10 @@ class Desk extends EventEmitter {
       }
     }
 
+    if (todo) {
+      const envelope = { id: crypto.randomUUID(), origin: "x".repeat(128), clock: Number.MAX_SAFE_INTEGER, type: "todo", entity_id: todo.message_id, data: todo, deleted: false, time: ev.received };
+      if (Buffer.byteLength(JSON.stringify(envelope), "utf8") > 58000) throw Object.assign(new Error("Сообщение превышает лимит 58 000 байт; сократите текст или передайте файл отдельно (остальное место зарезервировано для квитанций)"), { status: 413 });
+    }
     const who = `${ev.agent} (${ev.project})`;
     if (todo && alertTitle) {
       // The addressee works on another desk of this Wi-Fi (config.peer_auto): it goes there, no popup here.
@@ -1031,6 +1061,20 @@ class Desk extends EventEmitter {
     res.end(data);
   }
 
+  _resolveTaskId(id) {
+    const value = clean(id, 128);
+    if (/^AT-\d+$/i.test(value)) {
+      const upper = value.toUpperCase();
+      return Object.entries(this.state.task_card_ids || {}).find(([, card]) => card === upper)?.[0] || value;
+    }
+    if (/^A[BD]-\d+$/i.test(value)) {
+      const upper = value.toUpperCase();
+      const todo = this.state.todos.find(t => String(t.display_id || "").toUpperCase() === upper);
+      if (todo?.task_id) return todo.task_id;
+    }
+    return id;
+  }
+
   async _handle(req, res) {
     const url = new URL(req.url, "http://desk.invalid");
     if (!this._hostHeaderOk(req.headers.host)) return this._send(res, 403, { error: "host not allowed" });
@@ -1073,7 +1117,7 @@ class Desk extends EventEmitter {
       if (url.pathname === "/api/alerts") return this._waitAlerts(res, url, cors);
       if (url.pathname === "/api/mail") return this._send(res, 200, this.mailPayload(), cors);
       if (url.pathname === "/api/tasks/context") {
-        try { return this._send(res, 200, this.tasks.context(url.searchParams.get("id")), cors); }
+        try { return this._send(res, 200, this.tasks.context(this._resolveTaskId(url.searchParams.get("id"))), cors); }
         catch (e) { return this._send(res, e.status || 400, { error: e.message }, cors); }
       }
       if (url.pathname === "/api/pairing") {
@@ -1158,19 +1202,30 @@ class Desk extends EventEmitter {
     const route = url.pathname.slice("/api/agent/".length);
     try {
       if (req.method === "GET") {
-        const project = url.searchParams.get("project") || "", agent = url.searchParams.get("agent") || "";
-        const tasks = this.tasks.list({ project, agent });
+        const project = url.searchParams.get("project") || "", agent = url.searchParams.get("agent") || "", session_id = url.searchParams.get("session_id") || "";
+        const tasks = this.tasks.list({ project, agent, session_id, ...(route === "inbox" ? { device_id: this.config.device_id } : {}) });
         if (route === "inbox") return this._send(res, 200, {
           device_id: this.config.device_id, tasks,
-          todos: this.state.todos.filter(t => !t.acked_at && !t.done_at && (!project || t.project === project) && (!agent || this._sameAgent(t.to, agent)))
+          todos: this.state.todos.filter(t => !t.acked_at && !t.done_at && !t.superseded_by && (!project || t.project === project) && (!agent || this._sameAgent(t.to, agent))
+            && (!t.recipient_device_id || t.recipient_device_id === this.config.device_id)
+            && (!session_id || !t.recipient_session_id || t.recipient_session_id === session_id))
             .map(t => ({ ...t, forward_text: forwardText(t) })),
         }, cors);
         if (route === "status") return this._send(res, 200, { tasks, bindings: Object.values(this.state.bindings || {}), device_id: this.config.device_id }, cors);
-        if (route === "context") return this._send(res, 200, this.tasks.context(url.searchParams.get("id")), cors);
+        if (route === "context") return this._send(res, 200, this.tasks.context(this._resolveTaskId(url.searchParams.get("id"))), cors);
         if (route === "read") {
-          const id = url.searchParams.get("id"), todo = this.state.todos.find(t => t.message_id === id || t.display_id === id);
-          const task = this.state.tasks?.[id] || (todo && this.state.tasks?.[todo.task_id]);
-          return this._send(res, todo || task ? 200 : 404, todo || task ? { todo, task } : { error: "сообщение/задача не найдены" }, cors);
+          const rawId = clean(url.searchParams.get("id"), 128);
+          const resolved = this._resolveTaskId(rawId);
+          const taskByCard = resolved !== rawId ? this.state.tasks?.[resolved] : null;
+          const todo = this.state.todos.find(t => t.message_id === rawId || String(t.display_id || "").toUpperCase() === rawId.toUpperCase())
+            || (taskByCard?.assignment_message_id && this.state.todos.find(t => t.message_id === taskByCard.assignment_message_id))
+            || (taskByCard && this.state.todos.find(t => t.task_id === taskByCard.task_id));
+          const task = this.state.tasks?.[resolved] || (todo && this.state.tasks?.[todo.task_id]);
+          const card = task ? this.state.task_card_ids?.[task.task_id] : undefined;
+          return this._send(res, todo || task ? 200 : 404, todo || task ? {
+            todo: todo && { ...todo, forward_text: forwardText(todo) },
+            task: task && (card ? { ...task, card_id: card } : task),
+          } : { error: "сообщение/задача не найдены" }, cors);
         }
         return this._send(res, 404, { error: "not found" }, cors);
       }
@@ -1192,8 +1247,8 @@ class Desk extends EventEmitter {
             || (t.origin_device_id === this.config.device_id && !t.from_device && t.display_id === body.message_id));
           if (!t) throw Object.assign(new Error("сообщение не найдено"), { status: 404 });
           if (t.project !== ev.project || !this._sameAgent(t.to, ev.agent)) throw Object.assign(new Error("ACK не соответствует проекту/адресату"), { status: 403 });
-          const task = t.task_id && this.state.tasks[t.task_id];
-          if (task?.assignment?.session_id && task.assignment.session_id !== ev.session) throw Object.assign(new Error("ACK из другой сессии"), { status: 409 });
+          const ackError = this._ackError(t, ev);
+          if (ackError) throw Object.assign(new Error(ackError), { status: 409 });
           if (!t.acked_at && !this._acknowledge(ev)) throw Object.assign(new Error("ACK не соответствует назначению"), { status: 409 });
           this._saveState(); this.emit("change");
           return this._send(res, 200, { ok: true, message_id: t.message_id, acked_at: t.acked_at }, cors);
@@ -1254,7 +1309,9 @@ class Desk extends EventEmitter {
       } else if (parts[3] === "done") {
         this._close(t, now, false);
       } else if (parts[3] === "undo") {
-        Object.assign(t, { done_at: null, forwarded_at: null, acked_at: null, acked_by: null, sent_to: null, send_error: null, receipt_epoch: (t.receipt_epoch || 0) + 1 });
+        if (t.superseded_by) return { code: 409, body: { error: "Это сообщение заменено новым; откройте текущую карточку" } };
+        if (!t.acked_at) t.done_at = null;
+        t.receipt_epoch = (t.receipt_epoch || 0) + 1;
       } else {
         return { code: 404, body: { error: "not found" } };
       }

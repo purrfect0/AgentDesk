@@ -113,15 +113,18 @@ class SyncJournal {
     const s = this.desk.state, key = `${ev.type}:${ev.entity_id}`, j = this.journal;
     const priorEntity = ev.type === "todo" ? s.todos.find(t => t.message_id === ev.entity_id) : ev.type === "task" ? s.tasks[ev.entity_id] : null;
     if (priorEntity && !ev.deleted && (priorEntity.project !== ev.data.project || (priorEntity.project_id && ev.data.project_id && priorEntity.project_id !== ev.data.project_id))) throw error("идентичность проекта не может измениться при синхронизации", 409);
+    const sameMessage = ev.type === "todo" && !ev.deleted && priorEntity && ["message", "to", "task_id", "assignment_epoch", "recipient_session_id", "recipient_device_id"].every(field => priorEntity[field] === ev.data[field]);
+    const higherReceipt = sameMessage && (ev.data.receipt_epoch || 0) > (priorEntity.receipt_epoch || 0);
     const higherAssignment = ev.type === "task" && !ev.deleted && priorEntity && (ev.data.assignment?.epoch || 0) > (priorEntity.assignment?.epoch || 0) && ev.origin === priorEntity.coordinator_device_id;
-    if (!higherAssignment && !newer(version(ev), j.versions[key])) {
+    if (!higherAssignment && !higherReceipt && !newer(version(ev), j.versions[key])) {
       // Concurrent delivery and ACK are independent monotonic facts, not competing status snapshots.
       if (ev.type === "todo" && !ev.deleted) {
         const old = s.todos.find(t => t.message_id === ev.entity_id), incoming = ev.data;
-        if (old && (old.receipt_epoch || 0) === (incoming.receipt_epoch || 0)) {
-          if (!old.acked_at && incoming.acked_at) Object.assign(old, { acked_at: incoming.acked_at, acked_by: incoming.acked_by, forwarded_at: incoming.forwarded_at, done_at: incoming.done_at });
+        if (old && sameMessage) {
+          if (!old.acked_at && incoming.acked_at) Object.assign(old, { acked_at: incoming.acked_at, acked_by: incoming.acked_by, forwarded_at: old.forwarded_at || incoming.forwarded_at, done_at: incoming.done_at || incoming.acked_at });
           if (!old.delivered_at && incoming.delivered_at) old.delivered_at = incoming.delivered_at;
-          if (!old.done_at && incoming.done_at) old.done_at = incoming.done_at;
+          if (!old.forwarded_at && incoming.forwarded_at) old.forwarded_at = incoming.forwarded_at;
+          if (!old.done_at && incoming.done_at && (old.receipt_epoch || 0) === (incoming.receipt_epoch || 0)) old.done_at = incoming.done_at;
         }
       }
       return;
@@ -132,12 +135,20 @@ class SyncJournal {
       if (!data) { if (pos >= 0) s.todos.splice(pos, 1); }
       else if (pos >= 0) {
         const old = s.todos[pos], sameReceipt = (data.receipt_epoch || 0) === (old.receipt_epoch || 0);
-        if ((data.receipt_epoch || 0) < (old.receipt_epoch || 0)) return;
+        if ((data.receipt_epoch || 0) < (old.receipt_epoch || 0)) {
+          if (sameMessage) {
+            if (!old.acked_at && data.acked_at) Object.assign(old, { acked_at: data.acked_at, acked_by: data.acked_by, done_at: data.done_at || data.acked_at });
+            old.forwarded_at ||= data.forwarded_at;
+            old.delivered_at ||= data.delivered_at;
+          }
+          return;
+        }
         s.todos[pos] = { ...data, id: old.id, display_id: old.display_id,
-          delivered_at: old.delivered_at || data.delivered_at,
+          delivered_at: sameMessage ? old.delivered_at || data.delivered_at : data.delivered_at,
+          ...(sameMessage && old.forwarded_at ? { forwarded_at: old.forwarded_at } : {}),
           ...(old.from_device && old.from_device.id !== this.desk.config.device_id ? { from_device: old.from_device } : {}),
-          ...(sameReceipt && old.done_at ? { done_at: old.done_at } : {}),
-          ...(sameReceipt && old.acked_at ? { acked_at: old.acked_at, acked_by: old.acked_by, done_at: old.done_at, forwarded_at: old.forwarded_at } : {}) };
+          ...(sameMessage && sameReceipt && old.done_at ? { done_at: old.done_at } : {}),
+          ...(sameMessage && old.acked_at ? { acked_at: old.acked_at, acked_by: old.acked_by, done_at: old.done_at || old.acked_at, forwarded_at: old.forwarded_at } : {}) };
       }
       else {
         const id = s.next_id++;

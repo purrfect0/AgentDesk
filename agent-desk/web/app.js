@@ -53,6 +53,9 @@ let online = true;
 let lastUpdated = null;
 let dialogReturnFocus = null;
 let phoneNotify = localStorage.getItem("ad.phoneNotify") !== "0";
+let todoFilter = "action";
+let todoSearch = "";
+let todoMenuId = null;
 let taskFilter = "all";
 let taskSearch = "";
 let taskRenderLimit = 60;
@@ -311,7 +314,7 @@ function applySelection() {
     tr.classList.toggle("highlighted", !!on);
   });
   const todo = selected?.type === "todo" ? data.todos.find((t) => t.id === selected.id) : null;
-  $("#tb-copy").disabled = !todo?.message;
+  $("#tb-copy").disabled = !todo?.message || !!todo.superseded_by;
   $("#tb-forwarded").disabled = !(online && isForwardPending(todo) && !todo.forwarded_at && !todo.acked_at);
   $("#tb-done").disabled = !(online && todo && !todo.done_at);
   const peers = data.link?.peers || [];
@@ -322,14 +325,41 @@ function applySelection() {
   $("#tb-forget").disabled = !agent || (!!agent.device_id && agent.device_id !== data.device_id);
 }
 
+function matchesSearch(query, values) {
+  const haystack = values.filter(Boolean).join(" ").toLocaleLowerCase();
+  return query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean).every(word => haystack.includes(word));
+}
+function todoMatches(t) {
+  if (todoSearch.trim()) {
+    const task = currentTask(t.task_id);
+    return matchesSearch(todoSearch, [t.display_id, task?.card_id, t.task, t.project, t.agent, t.to, t.message]);
+  }
+  if (!inProject(t)) return false;
+  if (showClosed) return true;
+  if (todoFilter === "action") return needsAction(t);
+  if (todoFilter === "waiting") return !t.done_at && !t.acked_at && !needsAction(t);
+  return true;
+}
+function cardAge(created) {
+  const time = Date.parse(created);
+  if (!Number.isFinite(time)) return "—";
+  const minutes = Math.max(0, Math.floor((Date.now() - time) / 60000));
+  if (!minutes) return "только что";
+  if (minutes < 60) return `${minutes} мин`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours} ч${minutes % 60 ? ` ${minutes % 60} мин` : ""}` : `${Math.floor(hours / 24)} д${hours % 24 ? ` ${hours % 24} ч` : ""}`;
+}
 function renderTodos() {
-  const todos = data.todos
-    .filter((t) => inProject(t) && (showClosed || !t.done_at))
+  const todos = data.todos.filter(todoMatches)
     .sort((a, b) => (needsAction(b) - needsAction(a)) || (!!a.done_at - !!b.done_at) || b.created.localeCompare(a.created));
-  const open = todos.filter(needsAction).length;
-  const name = project === "*" ? "Нужно сделать" : `Нужно сделать — ${project}`;
+  const open = data.todos.filter(t => inProject(t) && needsAction(t)).length;
+  const searching = !!todoSearch.trim();
+  $("#todo-filter").value = todoFilter;
+  $("#todo-search-hint").hidden = !searching;
+  $("#clear-todo-search").hidden = !searching;
+  const name = searching ? `Найдено сообщений: ${todos.length}` : todoFilter === "waiting" ? "Ждём получения" : todoFilter === "all" || showClosed ? "Все сообщения" : project === "*" ? "Нужно сделать" : `Нужно сделать — ${project}`;
   const legend = $("#todo-legend");
-  const legendText = open ? `${name} (${open})` : name;
+  const legendText = !searching && todoFilter === "action" && !showClosed && open ? `${name} (${open})` : name;
   if (legend.textContent !== legendText) legend.textContent = legendText;
   const since = open ? todos.filter(needsAction).map((t) => t.created).sort().pop() : "";
   if (legend.dataset.since !== since) {
@@ -342,19 +372,73 @@ function renderTodos() {
       legend.classList.add("attn");
     }
   }
-  patch($("#todo-table tbody"), grouped(todos, 4, (t) => {
+  patch($("#todo-table tbody"), todos.map(t => {
     const act = needsAction(t);
     const cls = t.done_at ? "closed" : act ? `attn${t.kind === "forward" ? " attn-forward" : ""}` : "pending";
     const ico = t.kind === "forward" && t.forwarded_at ? "envelope_open_sheet-1" : TODO_ICON[t.kind];
-    const card = t.display_id || `AD-${t.id}`;
-    return `<tr class="${cls}" tabindex="0" data-key="t:${t.id}" data-todo="${t.id}"${act ? ` data-since="${esc(t.created)}" style="${accent(t.created)}"` : ""}>
+    const task = currentTask(t.task_id);
+    const card = t.purpose === "assignment" && task ? taskCardNumber(task) : t.display_id || `AD-${t.id}`;
+    return `<tr class="${cls}" tabindex="0" data-key="t:${t.id}" data-todo="${t.id}" aria-haspopup="menu" aria-controls="todo-context-menu" aria-expanded="${todoMenuId === t.id}"${act ? ` data-since="${esc(t.created)}" style="${accent(t.created)}"` : ""}>
       <td class="c-ico"><img src="${icon(ico)}" alt=""></td>
-      <td><code class="card-id">${esc(card)}</code>${todoText(t)}${t.task ? `: <span class="sub">${esc(t.task)}</span>` : ""}${peerNote(t)}</td>
-      <td class="nowrap status">${todoStatus(t)}</td>
-      <td class="nowrap opt">${esc(ago(t.created))}</td></tr>`;
-  }));
+      <td><code class="card-id">${esc(card)}</code><b>${esc(t.task || "Сообщение")}</b><br><span class="sub">${esc(t.project)} · ${t.purpose === "assignment" ? `Назначение №${esc(t.assignment_epoch)}` : esc(t.agent)}${t.to ? ` → ${esc(t.to)}` : ""}</span>${peerNote(t)}</td>
+      <td class="status">${todoStatus(t)}</td>
+      <td class="todo-age"><time datetime="${esc(t.created)}" title="${esc(new Date(t.created).toLocaleString("ru-RU"))}">${esc(cardAge(t.created))}</time></td></tr>`;
+  }).join(""));
+  $("#todo-empty").textContent = searching ? "Ничего не найдено. Попробуйте номер карточки, имя агента или слова из задания." : todoFilter === "waiting" ? "Нет сообщений, ожидающих получения." : "Нет действий для владельца. Пересланные задания доступны в «Ждём получения», остальные — через поиск.";
   $("#todo-table").classList.toggle("hidden", todos.length === 0);
   $("#todo-empty").classList.toggle("hidden", todos.length > 0);
+  if (todoMenuId !== null) {
+    const todo = todos.find(t => t.id === todoMenuId);
+    if (todo) renderTodoMenu(todo);
+    else closeTodoMenu();
+  }
+}
+
+function renderTodoMenu(todo) {
+  const menu = $("#todo-context-menu");
+  const copy = menu.querySelector('[data-action="copy-message"]');
+  copy.disabled = !todo.message || !!todo.superseded_by;
+  copy.querySelector("span").textContent = todo.forwarded_at || todo.acked_at || todo.done_at ? "Переслать снова (копировать)" : "Копировать промпт";
+  menu.querySelector('[data-action="mark-forwarded"]').disabled = !(online && isForwardPending(todo) && !todo.forwarded_at && !todo.acked_at && !todo.superseded_by);
+  menu.querySelector('[data-action="done-selected"]').disabled = !online || !!todo.done_at;
+  for (const action of ["copy-message", "mark-forwarded", "done-selected", "todo-details"]) menu.querySelector(`[data-action="${action}"]`).dataset.todoId = String(todo.id);
+}
+function closeTodoMenu(restoreFocus = false) {
+  if (todoMenuId === null) return;
+  const row = document.querySelector(`tr[data-todo="${todoMenuId}"]`);
+  $("#todo-context-menu").classList.add("hidden");
+  todoMenuId = null;
+  row?.setAttribute("aria-expanded", "false");
+  if (restoreFocus) row?.focus({ preventScroll: true });
+}
+function openTodoMenu(row, x, y) {
+  const todo = data?.todos.find(t => t.id === Number(row.dataset.todo));
+  if (!todo) return;
+  closeTodoMenu();
+  document.querySelectorAll(".menu.open").forEach(menu => menu.classList.remove("open"));
+  selected = { type: "todo", id: todo.id };
+  applySelection();
+  row.focus({ preventScroll: true });
+  todoMenuId = todo.id;
+  row.setAttribute("aria-expanded", "true");
+  renderTodoMenu(todo);
+  const menu = $("#todo-context-menu");
+  menu.style.left = "0px"; menu.style.top = "0px";
+  menu.classList.remove("hidden");
+  menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - menu.offsetWidth - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - menu.offsetHeight - 4))}px`;
+  menu.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
+}
+async function copySelectedTodo(e) {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || (e.code !== "KeyC" && e.key.toLowerCase() !== "c")) return;
+  if (!$("#modal-layer").classList.contains("hidden") || e.target.closest("input, textarea, select, [contenteditable]")) return;
+  const selection = document.getSelection?.();
+  if (selection && !selection.isCollapsed) return;
+  const todo = selected?.type === "todo" && data?.todos.find(t => t.id === selected.id);
+  if (!todo?.message || todo.superseded_by || !todoMatches(todo)) return;
+  e.preventDefault();
+  closeTodoMenu(true);
+  await ACTIONS["copy-message"]();
 }
 
 // --- linked tasks and project files ----------------------------------------------
@@ -402,9 +486,22 @@ function receiptsMarkup(t) {
     ["delivered_at", "доставлено на доску"], ["forwarded_at", "переслано"], ["acked_at", "ACK: получено"], ["done_at", "напоминание закрыто"]
   ].filter(([k]) => r[k]).map(([k, title]) => `<span title="${esc(r[k])}">${title}</span>`).join(" · ") || "ожидает доставки"}</li>`).join("");
 }
+function assignmentMessage(t) {
+  return (data?.todos || []).find(r => r.message_id === t.assignment_message_id && !r.superseded_by && r.assignment_epoch === taskEpoch(t));
+}
+async function copyTaskPrompt(t, button) {
+  const message = assignmentMessage(t);
+  if (message) return copyPromptText(forwardText(message), button, t.assignment?.agent);
+  try {
+    const context = await api(`/api/tasks/context?id=${encodeURIComponent(t.task_id)}`);
+    if (typeof context.text !== "string" || !context.text.trim()) throw new Error("Текст задания отсутствует");
+    return copyPromptText(context.text, button, t.assignment?.agent);
+  } catch (error) { alertBox("Копирование задания", error.message, "msg_warning-2"); }
+}
 function taskMatches(t) {
-  const q = taskSearch.trim().toLowerCase();
-  if (q && ![taskCardNumber(t), t.title, t.task, t.project, t.assignment?.agent].some(v => String(v || "").toLowerCase().includes(q))) return false;
+  const q = taskSearch.trim();
+  const messages = taskReceiptRows(t);
+  if (q && !matchesSearch(q, [taskCardNumber(t), t.title, t.task, t.project, t.assignment?.agent, t.prompt, ...messages.flatMap(r => [r.display_id, r.message])])) return false;
   if (taskFilter === "active") return ["assigned", "working", "rework", "blocked"].includes(t.state);
   if (taskFilter === "submitted") return t.state === "submitted";
   if (taskFilter === "blocked") return ["blocked", "rework"].includes(t.state);
@@ -422,7 +519,7 @@ function renderTasks() {
   if (filterSel && filterSel.value !== taskFilter) filterSel.value = taskFilter;
   const searchInp = $("#task-search");
   if (searchInp && searchInp.value !== taskSearch) searchInp.value = taskSearch;
-  const all = taskList().filter(inProject).sort((a, b) => String(b.updated || "").localeCompare(String(a.updated || "")));
+  const all = taskList().filter(t => taskSearch.trim() || inProject(t)).sort((a, b) => String(b.updated || "").localeCompare(String(a.updated || "")));
   const tasks = all.filter(taskMatches);
   const shown = tasks.slice(0, taskRenderLimit);
   const countEl = $("#task-count");
@@ -430,6 +527,9 @@ function renderTasks() {
   patch($("#task-list"), shown.length ? shown.map((t) => {
     const a = t.assignment || {};
     const coordinator = canCoordinate(t);
+    const message = assignmentMessage(t);
+    const repeat = message && (message.forwarded_at || message.acked_at || message.done_at);
+    const copy = !message ? "Копировать контекст" : repeat ? "Переслать снова" : `Копировать задание для ${a.agent || "агента"}`;
     const readonly = !online ? "Нет связи — только просмотр" : !coordinator ? "Назначение и передача — на компьютере ведущего" : "";
     return `<article class="task-card" data-key="task:${esc(t.task_id)}">
       <header><h2><code aria-label="Номер карточки">${esc(taskCardNumber(t))}</code> — ${esc(t.title || t.task || "Без названия")}</h2><b class="task-badge task-${esc(Object.hasOwn(TASK_LABEL, t.state) ? t.state : "unknown")}">${esc(TASK_LABEL[t.state] || t.state || "неизвестно")}</b></header>
@@ -437,7 +537,7 @@ function renderTasks() {
       <dl class="task-meta"><dt>Исполнитель</dt><dd>${esc(a.agent || "не назначен")} · ${esc(roleLabel(a.role))}</dd><dt>Компьютер</dt><dd>${esc(deviceLabel(a.device_id))}</dd><dt>Сессия</dt><dd>${esc(sessionLabel(t))}</dd></dl>
       ${t.conflict ? `<p class="peer-warn">Конфликт задания: ${esc(typeof t.conflict === "string" ? t.conflict : "нужна сверка ведущим")}</p>` : ""}
       <details><summary>Сообщения и квитанции (${taskReceiptRows(t).length})</summary><ul class="receipt-list">${receiptsMarkup(t)}</ul><p class="sub">ACK подтверждает только получение, а не выполнение или приёмку.</p></details>
-      <div class="task-actions"><button data-task-action="details" data-task-id="${esc(t.task_id)}">Подробно…</button><button data-task-action="context" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Контекст / копировать…</button><button data-task-action="assign" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Назначить…</button><button data-task-action="transition" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Состояние…</button><button data-task-action="handoff" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Передать…</button></div>
+      <div class="task-actions"><button data-task-action="copy" data-task-id="${esc(t.task_id)}"${message || online ? "" : " disabled"}>${esc(copy)}</button>${message && !message.forwarded_at && !message.acked_at && !message.done_at ? `<button data-action="mark-forwarded" data-todo-id="${message.id}"${online ? "" : " disabled"}>Переслал</button>` : ""}<button data-task-action="details" data-task-id="${esc(t.task_id)}">Подробно…</button><button data-task-action="context" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Контекст / копировать…</button><button data-task-action="assign" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Назначить…</button><button data-task-action="transition" data-task-id="${esc(t.task_id)}"${online ? "" : " disabled"}>Состояние…</button><button data-task-action="handoff" data-task-id="${esc(t.task_id)}"${coordinator ? "" : " disabled"}>Передать…</button></div>
       ${readonly ? `<p class="sub">${readonly}</p>` : ""}</article>`;
   }).join("") + (tasks.length > shown.length ? `<div class="tasks-more"><button data-action="tasks-show-all">Показать все карточки (${tasks.length})</button></div>` : "")
     : `<p class="empty">${supported ? (all.length ? "Ничего не найдено по фильтру или поиску." : "Задач пока нет. Назначьте первую задачу; номер карточки сохранится при смене сессии.") : "Ожидается сервер с поддержкой задач."}</p>`);
@@ -539,7 +639,7 @@ function assignmentFields(t) {
     const devices = new Map([[data.device_id, data.link?.name || "этот компьютер"], ...(data.link?.peers || []).map(p => [p.id, p.name || "другой компьютер"])]);
   if (a.device_id && !devices.has(a.device_id)) devices.set(a.device_id, "ранее привязанный компьютер");
   const deviceSelect = `<div class="field-row-stacked"><label for="assign-device_id">Компьютер</label><select id="assign-device_id" name="device_id">${[...devices].map(([id,name]) => `<option value="${esc(id)}"${id === (a.device_id || data.device_id) ? " selected" : ""}>${esc(name)}</option>`).join("")}</select></div>`;
-  return `${bindings.length ? `<div class="field-row-stacked"><label for="assign-binding">Сохранённая привязка</label><select id="assign-binding"><option value="">Введите вручную</option>${bindings.map((b, i) => `<option value="${i}">${esc(`${b.agent} · ${deviceLabel(b.device_id)} · ${b.role || "без роли"} · привязка ${i + 1}`)}</option>`).join("")}</select></div>` : ""}<div class="assignment-grid">${field("agent", "Имя агента", a.agent)}${deviceSelect}${field("session_id", "Привязка сессии агента", a.session_id)}${field("role", "Роль (исполнитель / ревьюер / ведущий)", a.role || "executor")}${field("adapter", "Адаптер запуска (manual / runtime)", a.adapter || "manual", false)}</div>`;
+  return `${bindings.length ? `<div class="field-row-stacked"><label for="assign-binding">Сохранённая привязка</label><select id="assign-binding"><option value="">Введите вручную</option>${bindings.map((b, i) => `<option value="${i}">${esc(`${b.agent} · ${deviceLabel(b.device_id)} · ${b.role || "без роли"} · привязка ${i + 1}`)}</option>`).join("")}</select></div>` : ""}<div class="assignment-grid">${field("agent", "Имя агента", a.agent)}${deviceSelect}</div><details><summary>Привязка сессии и роль</summary><p class="sub">Для ручной пересылки сессия создаётся автоматически и добавляется в промпт. Если агент уже подключён, выберите его сохранённую привязку.</p><div class="assignment-grid">${field("session_id", "Привязка сессии агента", a.session_id)}${field("role", "Роль (executor / reviewer / coordinator)", a.role || "executor")}${field("adapter", "Адаптер запуска", a.adapter || "manual", false)}</div></details>`;
 }
 function taskMutationDialog(mode, t) {
   if (!online || (mode !== "transition" && !canCoordinate(t))) return;
@@ -547,15 +647,17 @@ function taskMutationDialog(mode, t) {
   const label = { assign: creating ? "Назначить новую задачу" : "Изменить назначение", handoff: "Передать задачу в новую сессию", transition: "Состояние задачи" }[mode];
   const newFields = creating ? '<div class="field-row-stacked"><label for="task-project">Проект</label><input type="text" id="task-project" required maxlength="160"></div><div class="field-row-stacked"><label for="task-title">Название задачи</label><input type="text" id="task-title" required maxlength="500"></div>' : `<p><code>${esc(taskCardNumber(t))}</code> · ${esc(t.title || t.task)}</p>`;
   const lifecycle = mode === "transition" ? `<div class="field-row-stacked"><label for="task-state">Новое состояние (отдельно от ACK)</label><select id="task-state">${Object.entries(TASK_LABEL).map(([k, v]) => `<option value="${k}"${k === t.state ? " selected" : ""}${k !== t.state && (!(TASK_NEXT[t.state] || []).includes(k) || (["accepted", "rework"].includes(k) && !canCoordinate(t))) ? " disabled" : ""}>${v}</option>`).join("")}</select></div><div class="field-row-stacked"><label for="task-note">Пояснение</label><input type="text" id="task-note" maxlength="1000"></div>` : assignmentFields(t);
+  const promptFields = mode !== "transition" ? '<div class="field-row-stacked"><label for="task-prompt">Промпт для агента</label><textarea id="task-prompt" rows="7" aria-describedby="task-prompt-help" placeholder="Что сделать, какой результат нужен, ограничения и ссылки на материалы…"></textarea><p class="sub" id="task-prompt-help">Копируется целиком вместе с реквизитами задания. До 20 000 символов; при превышении текст останется в форме.</p></div>' : "";
   const checkpointFields = mode === "handoff" ? `<details><summary>Checkpoint: репозиторий, ветка, commit, отчёт</summary>${["repo", "branch", "commit", "report"].map((k) => `<div class="field-row-stacked"><label for="checkpoint-${k}">${esc(k)}</label><input type="text" id="checkpoint-${k}" value="${esc(t.checkpoint?.[k])}" autocomplete="off" spellcheck="false" maxlength="1024"></div>`).join("")}<p class="sub">Проверяются только явно разрешённые локальные пути. Список выбранных skills и артефакты сохраняются; содержимое файлов здесь не читается.</p></details>` : "";
   const handoff = mode === "handoff" ? '<p>Сохраняется текущий checkpoint и артефакты. После передачи получите контекст с результатами локальных проверок. Не вставляйте секреты или команды.</p><div class="field-row-stacked"><label for="handoff-next">Следующий шаг</label><textarea id="handoff-next" class="short-text" maxlength="4000"></textarea></div><div class="field-row-stacked"><label for="handoff-constraints">Ограничения / запреты (по одному на строку)</label><textarea id="handoff-constraints" class="short-text" maxlength="4000"></textarea></div>' : "";
-  dialog(label, `<form id="task-form">${newFields}${lifecycle}${checkpointFields}${handoff}<p id="task-error" class="bad" role="status" aria-live="polite"></p><p class="sub">Старое назначение не принимается: при конфликте обновите карточку. Неизвестный адаптер требует ручного запуска.</p><div class="buttons"><button type="submit" id="task-save">${mode === "handoff" ? "Передать и получить контекст" : "Сохранить"}</button><button type="button" data-close>Отмена</button></div></form>`, (node) => {
+  dialog(label, `<form id="task-form">${newFields}${promptFields}${lifecycle}${checkpointFields}${handoff}<p id="task-error" class="bad" role="status" aria-live="polite"></p><p class="sub">Старое назначение не принимается: при конфликте обновите карточку. Неизвестный адаптер требует ручного запуска.</p><div class="buttons"><button type="submit" id="task-save">${mode === "handoff" ? "Передать и получить контекст" : "Сохранить"}</button><button type="button" data-close>Отмена</button></div></form>`, (node) => {
     if (creating) node.querySelector("#task-project").value = project === "*" ? "" : project;
+    if (mode !== "transition") node.querySelector("#task-prompt").value = t?.prompt || (t && assignmentMessage(t)?.message) || "";
+    if (creating || mode === "handoff") node.querySelector("#assign-session_id").value = `manual-${Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16).padStart(8, "0")).join("")}`;
     if (mode === "handoff") {
       for (const k of ["repo", "branch", "commit", "report"]) node.querySelector(`#checkpoint-${k}`).value = t.checkpoint?.[k] || "";
       node.querySelector("#handoff-next").value = t.checkpoint?.next_step || "";
       node.querySelector("#handoff-constraints").value = Array.isArray(t.checkpoint?.constraints) ? t.checkpoint.constraints.join("\n") : String(t.checkpoint?.constraints || "");
-      node.querySelector("#assign-session_id").value = "";
     }
     const bindings = listValues(data.bindings).filter((b) => !t || b.project === t.project);
     node.querySelector("#assign-binding")?.addEventListener("change", (e) => {
@@ -574,6 +676,9 @@ function taskMutationDialog(mode, t) {
         if (!body.assignment.adapter) body.assignment.adapter = "manual";
         Object.assign(body, body.assignment); // flat fields are accepted by the additive TaskService contract too
         if (creating) body.title = node.querySelector("#task-title").value.trim();
+        const prompt = node.querySelector("#task-prompt").value.trim();
+        if (prompt.length > 20000) { err.textContent = `В промпте ${prompt.length.toLocaleString("ru-RU")} символов, максимум 20 000. Текст сохранён в форме: сократите его или вынесите материалы в файл.`; node.querySelector("#task-prompt").focus(); return; }
+        if (prompt) body.prompt = prompt;
         if (mode === "handoff") body.checkpoint = { ...t.checkpoint, ...Object.fromEntries(["repo", "branch", "commit", "report"].map((k) => [k, node.querySelector(`#checkpoint-${k}`).value.trim()])), next_step: node.querySelector("#handoff-next").value.trim(), constraints: node.querySelector("#handoff-constraints").value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) };
       }
       save.disabled = true; err.textContent = "Сохраняю…";
@@ -1017,6 +1122,23 @@ async function copyText(text) {
   }
 }
 
+async function copyPromptText(text, button, recipient) {
+  const ok = await copyText(text);
+  if (!ok) {
+    dialog("Скопируйте задание вручную", '<p>Буфер обмена недоступен. Текст выделен целиком — нажмите Ctrl+C.</p><textarea id="manual-copy" readonly aria-label="Полный промпт"></textarea><div class="buttons"><button data-close>Закрыть</button></div>', node => {
+      const field = node.querySelector("#manual-copy"); field.value = text; field.focus(); field.select();
+    }, { wide: true });
+    return false;
+  }
+  $("#copy-status").textContent = `Скопировано${recipient ? ` для ${recipient}` : ""}. Вставьте в чат агента. Копирование не отмечает доставку или получение.`;
+  if (button) {
+    const label = button.querySelector("span") || button, previous = label.textContent;
+    label.textContent = "Скопировано";
+    setTimeout(() => { if (label.isConnected) label.textContent = previous; }, 1500);
+  }
+  return true;
+}
+
 // --- other computers of the Wi-Fi (core/peers.js) -------------------------------
 
 // The changing part of the "Другие компьютеры" dialog: render() redraws it in place while it is open.
@@ -1332,24 +1454,29 @@ const ACTIONS = {
     (node) => { const mb = node.querySelector(".msg-body"); if (mb) mb.textContent = item.message; }, { wide: true });
   },
   async "copy-message"(e) {
-    const todo = selected?.type === "todo" && data.todos.find((t) => t.id === selected.id);
-    if (!todo?.message) return;
-    const ok = await copyText(forwardText(todo));
-    const btn = e?.target?.closest("button");
-    if (btn && ok) {
-      const label = btn.querySelector("span") || btn;
-      const old = label.textContent;
-      label.textContent = "Скопировано";
-      setTimeout(() => { label.textContent = old; }, 1500);
-    } else if (!ok) {
-      alertBox("Копирование", "Браузер не дал скопировать. Откройте «Подробно» и выделите текст вручную.", "msg_warning-2");
-    }
+    const button = e?.target?.closest("button");
+    const id = button?.dataset.todoId ? Number(button.dataset.todoId) : selected?.type === "todo" ? selected.id : null;
+    const todo = data.todos.find(t => t.id === id);
+    if (!todo?.message || todo.superseded_by) return;
+    await copyPromptText(forwardText(todo), button, todo.to);
   },
-  "mark-forwarded"() {
-    if (selected?.type === "todo") act(`/api/todo/${selected.id}/forwarded`, {});
+  "todo-details"(e) {
+    selected = { type: "todo", id: Number(e.target.closest("button").dataset.todoId) };
+    ACTIONS.details();
   },
-  "done-selected"() {
-    if (selected?.type === "todo") act(`/api/todo/${selected.id}/done`, {});
+  "clear-todo-search"() {
+    todoSearch = ""; $("#todo-search").value = ""; renderTodos(); $("#todo-search").focus();
+  },
+  "mark-forwarded"(e) {
+    const button = e?.target?.closest("button");
+    const id = button?.dataset.todoId ? Number(button.dataset.todoId) : selected?.type === "todo" ? selected.id : null;
+    if (id !== null && online) act(`/api/todo/${id}/forwarded`, {});
+  },
+  "done-selected"(e) {
+    const button = e?.target?.closest("button");
+    const id = button?.dataset.todoId ? Number(button.dataset.todoId) : selected?.type === "todo" ? selected.id : null;
+    const todo = data.todos.find(t => t.id === id);
+    if (online && todo && !todo.done_at) act(`/api/todo/${id}/done`, {});
   },
   forget() {
     if (selected?.type !== "agent") return;
@@ -1422,14 +1549,40 @@ const ACTIONS = {
 
 // --- events ---------------------------------------------------------------------
 
+document.addEventListener("pointerdown", (e) => {
+  if (!e.target.closest("#todo-context-menu")) closeTodoMenu();
+});
+document.addEventListener("contextmenu", (e) => {
+  const row = e.target.closest("tr[data-todo]");
+  if (!row || !data || !$("#modal-layer").classList.contains("hidden")) { closeTodoMenu(); return; }
+  e.preventDefault();
+  openTodoMenu(row, e.clientX, e.clientY);
+});
+document.addEventListener("focusin", (e) => {
+  if (!e.target.closest("#todo-context-menu")) closeTodoMenu();
+});
+document.addEventListener("scroll", (e) => {
+  const menu = $("#todo-context-menu");
+  if (menu.classList.contains("hidden")) return;
+  if (e.target === document || e.target === document.documentElement || e.target === document.body) closeTodoMenu();
+}, true);
+window.addEventListener("resize", () => closeTodoMenu(true));
+window.addEventListener("blur", () => closeTodoMenu());
 document.addEventListener("click", (e) => {
+  const contextAction = e.target.closest("#todo-context-menu button");
+  if (contextAction) {
+    e.preventDefault();
+    if (!contextAction.disabled) { closeTodoMenu(true); ACTIONS[contextAction.dataset.action]?.(e); }
+    return;
+  }
+  closeTodoMenu();
   const menu = e.target.closest("[data-menu]");
   document.querySelectorAll(".menu.open").forEach((m) => { if (m !== menu) m.classList.remove("open"); });
   if (menu && e.target.closest(".menu-label")) { menu.classList.toggle("open"); return; }
   if (menu) menu.classList.remove("open");
 
   const action = e.target.closest("[data-action]");
-  if (action && (data || action.dataset.action === "connect")) { e.preventDefault(); ACTIONS[action.dataset.action]?.(e); return; }
+  if (action && (data || action.dataset.action === "connect")) { e.preventDefault(); if (!action.disabled) ACTIONS[action.dataset.action]?.(e); return; }
 
   const taskAction = e.target.closest("[data-task-action]");
   if (taskAction && data) {
@@ -1438,6 +1591,7 @@ document.addEventListener("click", (e) => {
     const action = taskAction.dataset.taskAction;
     if (action === "details") taskDetails(task);
     else if (action === "context") fetchTaskContext(task);
+    else if (action === "copy") copyTaskPrompt(task, taskAction);
     else taskMutationDialog(action, task);
     return;
   }
@@ -1479,7 +1633,30 @@ document.addEventListener("mouseover", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   const inDialog = !$("#modal-layer").classList.contains("hidden");
+  if ((e.ctrlKey || e.metaKey) && (e.code === "KeyC" || e.key.toLowerCase() === "c")) { copySelectedTodo(e); return; }
+  if (todoMenuId !== null) {
+    if (e.key === "Escape" || e.key === "Tab") { e.preventDefault(); closeTodoMenu(true); return; }
+    const menu = $("#todo-context-menu");
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
+      e.preventDefault();
+      const items = [...menu.querySelectorAll('button:not(:disabled)')];
+      const current = items.indexOf(document.activeElement);
+      const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : (current + (e.key === "ArrowUp" ? -1 : 1) + items.length) % items.length;
+      items[next]?.focus(); return;
+    }
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault(); menu.querySelector('button:focus:not(:disabled)')?.click(); return;
+    }
+  }
+  const menuRow = !inDialog && e.target.closest('tr[data-todo]');
+  if (menuRow && (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10"))) {
+    e.preventDefault(); const rect = menuRow.getBoundingClientRect(); openTodoMenu(menuRow, rect.left + 16, rect.bottom); return;
+  }
+  if (!inDialog && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+    e.preventDefault(); const field = $(tab === "tasks" ? "#task-search" : "#todo-search"); field.focus(); field.select(); return;
+  }
   if (e.key === "Escape") {
+    if (e.target === $("#todo-search") && todoSearch) { ACTIONS["clear-todo-search"](); return; }
     const openMenu = document.querySelector(".menu.open");
     if (openMenu) { openMenu.classList.remove("open"); return; }
     if (inDialog) { closeDialog(); return; }
@@ -1500,7 +1677,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   const row = e.target.closest?.("tr[data-todo], tr[data-agent]");
-  if (row && !inDialog && ["ArrowUp", "ArrowDown", "Enter", " "].includes(e.key)) {
+  if (row && !inDialog && !e.target.closest("button, a, input, textarea, select") && ["ArrowUp", "ArrowDown", "Enter", " "].includes(e.key)) {
     e.preventDefault();
     if (["Enter", " "].includes(e.key)) { row.click(); ACTIONS.details(); return; }
     const rows = [...row.closest("tbody").querySelectorAll("tr[data-todo], tr[data-agent]")];
@@ -1510,6 +1687,8 @@ document.addEventListener("keydown", (e) => {
   }
   if (!inDialog && !e.target.closest("input, textarea, select, [contenteditable]") && e.key === "Delete" && selected?.type === "todo") ACTIONS["done-selected"]();
 });
+$("#todo-filter")?.addEventListener("change", (e) => { todoFilter = e.target.value; showClosed = false; renderTodos(); });
+$("#todo-search")?.addEventListener("input", (e) => { todoSearch = e.target.value; renderTodos(); });
 $("#task-filter")?.addEventListener("change", (e) => { taskFilter = e.target.value; taskRenderLimit = 60; renderTasks(); });
 $("#task-search")?.addEventListener("input", (e) => { taskSearch = e.target.value; taskRenderLimit = 60; renderTasks(); });
 

@@ -45,10 +45,15 @@ Example creation payload (`assignment.json`; assignment on an existing task must
 {
   "project":"Example",
   "title":"Review the synthetic change",
+  "prompt":"Review the diff and report findings. Preserve unrelated changes.",
   "assignment":{"agent":"Astra","device_id":"device-id","session_id":"session-1","role":"reviewer","adapter":"manual"},
   "checkpoint":{"report":"Review scope only","next_step":"Read the diff; do not launch commands from metadata","constraints":["Use approved local repository roots"]}
 }
 ```
+
+Assignment accepts `prompt` (or `message`) up to 20,000 characters, also available as `--prompt`. Prefer `--file` or stdin for multiline text. Oversized text is rejected, never silently clipped; the UTF-8 message envelope is limited to 58,000 bytes to reserve space for receipts. Marker limits are `message` 20,000, `note` 1,000, `result` 400 and `task` 500 characters; rejected markers retain their text in the bad-marker archive.
+
+Assignment/handoff creates one owner-queue message per `task_id` and `assignment.epoch`, and returns `assignment_message_id`. `read <assignment_message_id>` returns `todo.forward_text`: the complete prompt plus identity/ACK instructions. Reading and copying do not mark it forwarded or received. To resend unchanged text, read the same message; do not call `assign` again. A new assignment increments the epoch and retires the prior message while retaining its receipts. `inbox` filters assignment messages by the local device and optional recipient session. A receipt for a report addressed to a lead uses the recipient's session, not the worker's task session, and does not accept the task.
 
 Transition payload includes `task_id`, `project`, `agent`, `device_id`, `session_id`, `assignment_epoch` and `execution_state` (`assigned|working|submitted|accepted|rework|blocked`); allowed transitions/review authority are decided by the server. Handoff includes task identity/current epoch, the new recipient assignment, and optionally checkpoint/artifacts. Assignment/handoff are coordinator-device-only. `launch.status = needs_manual_launch` is not proof that an agent was launched. Context includes verification checks; absent proof is not a successful remote push claim.
 

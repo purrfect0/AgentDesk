@@ -76,6 +76,33 @@ test("concurrent ACK and board delivery merge even when ACK has the lower Lampor
   assert.equal(a.state.todos[0].acked_at, "agent"); assert.equal(b.state.todos[0].acked_at, "agent");
 });
 
+test("manual forwarding survives a concurrent board-delivery snapshot", () => {
+  const a = desk("aaaaaaaaaaaaaaaa"), b = desk("ffffffffffffffff"), t = todo(a);
+  b.sync.receive(a.sync.page().events);
+  t.forwarded_at = "owner-forwarded"; a._saveState();
+  b.state.todos[0].delivered_at = "board-delivered"; b._saveState();
+  const forwarded = a.sync.journal.events.at(-1), delivered = b.sync.journal.events.at(-1);
+  a.sync.receive([delivered]); b.sync.receive([forwarded]);
+  for (const d of [a, b]) {
+    assert.equal(d.state.todos[0].forwarded_at, "owner-forwarded");
+    assert.equal(d.state.todos[0].delivered_at, "board-delivered");
+  }
+});
+
+test("reopening a closed reminder cannot erase a concurrent ACK for unchanged text", () => {
+  const a = desk("aaaaaaaaaaaaaaaa"), b = desk("ffffffffffffffff"), t = todo(a);
+  t.done_at = "closed"; a._saveState(); b.sync.receive(a.sync.page().events);
+  a.state.todos[0].done_at = null; a.state.todos[0].receipt_epoch = 1; a._saveState();
+  b.state.todos[0].acked_at = "received"; b.state.todos[0].acked_by = "Worker"; b.state.todos[0].forwarded_at = "forwarded"; b.state.todos[0].done_at = "received"; b._saveState();
+  const reopened = a.sync.journal.events.at(-1), acknowledged = b.sync.journal.events.at(-1);
+  a.sync.receive([acknowledged]); b.sync.receive([reopened]);
+  for (const d of [a, b]) {
+    assert.equal(d.state.todos[0].acked_at, "received");
+    assert.equal(d.state.todos[0].done_at, "received");
+    assert.equal(d.state.todos[0].receipt_epoch, 1);
+  }
+});
+
 test("same event UUID with modified data is rejected transactionally", () => {
   const a=desk(),b=desk("bbbbbbbbbbbbbbbb");todo(a);const ev=a.sync.page().events[0];b.sync.receive([ev]);
   const forged=structuredClone(ev);forged.data.message="different";

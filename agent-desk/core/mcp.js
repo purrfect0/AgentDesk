@@ -12,7 +12,7 @@ const DESCRIPTIONS = Object.freeze({
   status: "Read task, binding and device status from the local Agent Desk server.",
   handoff: "Explicit coordinator-only task handoff. Send task_id, assignment_epoch, recipient/binding and structured checkpoint/artifacts. A returned needs_manual_launch status is not a launched runtime.",
   context: "Read task context and bounded local verification checks by task UUID. Verification is evidence, not a claim that code was remotely pushed.",
-  assign: "Explicit coordinator-only assignment through Agent Desk. Send task identity and recipient agent/device/session/role/adapter; preserve server assignment epoch rules.",
+  assign: "Assign on the coordinator device with title, full prompt (max 20000 characters) and recipient agent/device/session/role/adapter. Creates an owner-queue message; returns assignment_message_id for read/ACK. Assigning or copying is not delivery. Do not repeat assign to resend: read the existing assignment_message_id.",
   transition: "Transition task execution state independently of mailbox receipts. Send task_id, assignment_epoch and session_id; do not treat ACK as accepted/done.",
 });
 
@@ -26,6 +26,7 @@ function toolSchemas(z) {
   }).passthrough().optional();
   const taskMutation = () => z.object({
     task_id: optionalText(), id: optionalText(), project_id: optionalText(), project: optionalText(), title: optionalText(), task: optionalText(),
+    prompt: z.string().min(1).max(20000).optional(), message: z.string().min(1).max(20000).optional(),
     agent: optionalText(), device_id: optionalText(), session_id: optionalText(), role: optionalText(), adapter: optionalText(),
     assignment_epoch: epoch(), previous_session_id: optionalText(), previous_device_id: optionalText(), state: optionalText(), execution_state: optionalText(),
     assignment: assignment(), binding: metadata(), checkpoint: metadata(), artifacts: z.array(z.unknown()).optional(),
@@ -33,7 +34,7 @@ function toolSchemas(z) {
   return {
     inbox: z.object({ project: optionalText(), agent: optionalText(), session_id: optionalText() }).strict(),
     read: z.object({ id: text() }).strict(),
-    ack: z.object({ project: text(), agent: text(), message_id: text(), session_id: optionalText() }).strict(),
+    ack: z.object({ project: text(), agent: text(), message_id: text(), session_id: optionalText(), assignment_epoch: epoch() }).strict(),
     submit: z.object({
       project: text(), agent: text(), state: text(), task_id: optionalText(), project_id: optionalText(),
       session_id: optionalText(), device_id: optionalText(), assignment_epoch: epoch(), execution_state: optionalText(),

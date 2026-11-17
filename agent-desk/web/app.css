@@ -71,7 +71,22 @@ body.native .status-bar { padding-right: 16px; }
 .menu-item img, .menu-item .check { width: 16px; height: 16px; flex: none; }
 .menu-item .check.on::before { content: "✓"; display: block; text-align: center; font-weight: bold; }
 .menu-item:hover { background: navy; color: #fff; }
-.menu-list hr { border: 0; border-top: 1px solid #808080; border-bottom: 1px solid #fff; margin: 3px 1px; }
+.menu-list hr, .todo-context-menu hr { border: 0; border-top: 1px solid #808080; border-bottom: 1px solid #fff; margin: 3px 1px; }
+.todo-context-menu {
+  position: fixed; z-index: 60; padding: 3px; min-width: min(250px, calc(100vw - 8px)); max-width: calc(100vw - 8px); max-height: calc(100vh - 8px);
+  box-sizing: border-box; overflow: auto; background: silver;
+  box-shadow: inset -1px -1px #0a0a0a, inset 1px 1px #dfdfdf, inset -2px -2px grey, inset 2px 2px #fff;
+}
+.todo-context-menu button {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 26px;
+  padding: 4px 8px; border: 0; box-shadow: none; background: transparent; color: #000; text-align: left;
+}
+.todo-context-menu button img { width: 16px; height: 16px; flex: none; }
+.todo-context-menu button span { flex: 1; }
+.todo-context-menu kbd { font: inherit; padding-left: 12px; }
+.todo-context-menu button:not(:disabled):is(:hover, :focus) { background: navy; color: #fff; outline: 1px dotted #fff; outline-offset: -3px; }
+.todo-context-menu button:disabled { color: #808080; text-shadow: 1px 1px #fff; }
+.todo-context-menu button:disabled img { filter: grayscale(1) opacity(.45); }
 
 /* Toolbar (Explorer-style flat buttons) */
 .toolbar {
@@ -162,7 +177,18 @@ b.to { font-weight: bold; }
 .vol-slider input { position: absolute; width: 150px; left: 50%; top: 50%; margin: 0; transform: translate(-50%, -50%) rotate(-90deg); }
 .vol-value { min-width: 36px; text-align: center; }
 .dialog:has(.vol-panel) { width: 320px; }
-.todo-panel { height: 168px; }
+.todo-panel { height: 208px; }
+.queue-toolbar { margin-bottom: 6px; }
+#copy-status { margin: 4px 0; min-height: 1em; }
+#todo-search-hint { margin: 4px 0; }
+#todo-table { table-layout: fixed; }
+#todo-table th:nth-child(3) { width: 145px; }
+#todo-table th:last-child { width: 100px; }
+#todo-table td { vertical-align: top; padding-top: 3px; padding-bottom: 3px; overflow-wrap: anywhere; white-space: normal; }
+#todo-table td.todo-age { white-space: nowrap; }
+#todo-table tr[data-todo] { user-select: none; }
+#task-prompt, #manual-copy { min-height: 130px; white-space: pre-wrap; }
+#manual-copy { width: 100%; min-height: 240px; }
 .empty { display: flex; align-items: center; gap: 8px; padding: 10px; color: #444; }
 .empty img { width: 32px; height: 32px; }
 code { font-family: "Courier New", Consolas, monospace; font-size: 1em; }
@@ -303,6 +329,9 @@ button:focus-visible, [role=tab]:focus-visible, summary:focus-visible { outline:
 body.mobile [data-action="mail-roots"] { display: none !important; }
 @media (max-width: 520px) {
   .assignment-grid { grid-template-columns: 1fr; }
+  #todo-table th:nth-child(3) { width: 90px; }
+  #todo-table th:last-child { width: 80px; }
+  #todo-table th:first-child, #todo-table td:first-child { display: none; }
   .task-meta { grid-template-columns: 1fr; }
   .task-meta dd { margin-bottom: 4px; }
   .dialog .kv { grid-template-columns: 1fr; }

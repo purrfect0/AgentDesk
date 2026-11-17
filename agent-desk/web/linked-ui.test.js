@@ -66,7 +66,7 @@ if (process.argv.includes("--serve")) {
   }
   function harness(state = fixture()) {
     const root = new FakeNode(); const mounted = [];
-    const ctx = vm.createContext({ console, Date, Object, Map, Set, String, Number, JSON, Array, Promise, encodeURIComponent, location: { hostname: "localhost" }, localStorage: { getItem: () => null, setItem() {} }, document: { createElement: () => new FakeNode(), querySelector: (s) => s === "#peers-live" ? null : root.querySelector(s), querySelectorAll: () => [], addEventListener() {} }, Node: { ELEMENT_NODE: 1, TEXT_NODE: 3 }, navigator: {}, AD_HOST: { kind: "web" }, __state: state, __mount: (title, html, onMount) => { const n = new FakeNode(); mounted.push({ title, html, node: n }); onMount?.(n); return n; } });
+    const ctx = vm.createContext({ console, Date, Object, Map, Set, String, Number, JSON, Array, Promise, crypto: require("node:crypto").webcrypto, window: { addEventListener() {} }, encodeURIComponent, location: { hostname: "localhost" }, localStorage: { getItem: () => null, setItem() {} }, document: { createElement: () => new FakeNode(), querySelector: (s) => s === "#peers-live" ? null : root.querySelector(s), querySelectorAll: () => [], addEventListener() {} }, Node: { ELEMENT_NODE: 1, TEXT_NODE: 3 }, navigator: {}, AD_HOST: { kind: "web" }, __state: state, __mount: (title, html, onMount) => { const n = new FakeNode(); mounted.push({ title, html, node: n }); onMount?.(n); return n; } });
     const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8").split("// --- desktop app window")[0];
     vm.runInContext(source + '\ndata = __state; project = "*"; online = true; patch = (node, html) => { node.innerHTML = html; }; dialog = __mount; poll = async () => {}; const isNative = false; const native = () => null;', ctx);
     return { ctx, root, mounted, run: (code) => vm.runInContext(code, ctx) };
@@ -81,7 +81,9 @@ if (process.argv.includes("--serve")) {
       for (const id of ["agents", "log", "tasks", "mail"]) assert.equal(h.root.querySelector(`#${id}-view`).classList.contains("hidden"), id !== view);
     }
     assert.match(h.root.querySelector("#tabs").innerHTML, /Агенты/); assert.match(h.root.querySelector("#tabs").innerHTML, /Журнал/); assert.match(h.root.querySelector("#tabs").innerHTML, /aria-controls="tasks-view"/);
-    assert.match(h.root.querySelector("#todo-table tbody").innerHTML, /Сообщение для/);
+    assert.equal(h.root.querySelector("#todo-table tbody").innerHTML, "");
+    h.run('todoFilter = "all"; renderTodos()');
+    assert.match(h.root.querySelector("#todo-table tbody").innerHTML, /AD-7/);
     h.run('online = false; render()'); assert.equal(h.root.querySelector("#board-offline").classList.contains("hidden"), false); assert.match(h.root.querySelector("#board-offline").textContent, /последние данные/);
   });
   test("task card number is visible before the title, with AD fallback and escaped aliases", () => {
@@ -143,6 +145,55 @@ if (process.argv.includes("--serve")) {
     assert.equal(h.run('fromDeviceLabel(data.todos[0])'), "");
     assert.equal(h.run('peerNote(data.todos[0])'), "");
   });
+  test("non-forward cards without task title show clear action text and superseded stays quiet", () => {
+    const state = fixture();
+    state.todos = [
+      { id: 10, display_id: "AD-10", message_id: "m10", project: "Demo", agent: "Opus (2)", kind: "reply", task: "", message: "Вопрос", created: new Date().toISOString() },
+      { id: 11, display_id: "AD-11", message_id: "m11", project: "Demo", agent: "Astra", kind: "limit", task: "", message: "Лимит", created: new Date().toISOString() },
+      { id: 12, display_id: "AD-12", message_id: "m12", project: "Demo", agent: "Ret", to: "Codex", kind: "forward", task: "", message: "Отчёт", created: new Date().toISOString() },
+    ];
+    const h = harness(state); h.run('renderTodos()');
+    const html = h.root.querySelector("#todo-table tbody").innerHTML;
+    assert.match(html, /ждёт вашего ответа/);
+    assert.match(html, /закончился лимит модели/);
+    assert.match(html, /Переслать Codex от Ret/);
+    assert.equal(h.run('needsAction({ kind: "forward", delivered_at: "2026-11-16", superseded_by: "newer" })'), false);
+  });
+  test("details shows AT card number, prompt in taskDetails, disables superseded copy and offers actions", () => {
+    const state = fixture(); state.tasks[0].card_id = "AT-42"; state.tasks[0].prompt = "<script>alert(1)</script>Промпт";
+    Object.assign(state.todos[0], { purpose: "assignment", assignment_epoch: 2, acked_at: null, superseded_by: "newer-id" });
+    const h = harness(state);
+    h.run('selected={type:"todo",id:7}; ACTIONS.details()');
+    const sup = h.mounted.at(-1).html;
+    assert.match(sup, /AT-42/);
+    assert.match(sup, /<button data-action="copy-message"[^>]*disabled/);
+    assert.match(sup, /заменено/);
+    delete state.todos[0].superseded_by; state.todos[0].done_at = new Date().toISOString();
+    h.run('ACTIONS.details()');
+    assert.match(h.mounted.at(-1).html, /data-action="reopen-todo"/);
+    state.todos[0].done_at = null;
+    h.run('ACTIONS.details()');
+    const open = h.mounted.at(-1).html;
+    assert.match(open, /data-action="mark-forwarded"/);
+    assert.match(open, /data-action="done-selected"/);
+    h.run('taskDetails(taskList()[0])');
+    const td = h.mounted.at(-1);
+    assert.match(td.html, /Промпт задания/);
+    assert.equal(td.node.querySelector("#task-prompt-body").textContent, state.tasks[0].prompt);
+  });
+  test("clearing prompt on handoff sends empty prompt and abFocus clears hidden filters", async () => {
+    const state = fixture(); state.tasks[0].prompt = "Old prompt";
+    const calls = []; const h = harness(state);
+    h.ctx.__api = async (url, body) => { calls.push({ url, body }); return url.includes("context?") ? { text: "OK", checks: {}, task: state.tasks[0] } : state.tasks[0]; };
+    h.run('api = __api; taskMutationDialog("handoff", data.tasks[0])');
+    const n = h.mounted.at(-1).node;
+    n.querySelector("#task-prompt").value = "";
+    await submit(h);
+    assert.equal(calls[0].body.prompt, "");
+    h.run('todoFilter = "waiting"; todoSearch = "old"; window.abFocus("Demo", 7)');
+    assert.equal(h.run('todoSearch'), "");
+    assert.equal(h.run('todoFilter'), "all");
+  });
   test("task filter and search narrow the rendered cards", () => {
     const state = fixture();
     const second = { ...state.tasks[0], task_id: "55555555-5555-4555-8555-555555555555", title: "Другая задача", state: "accepted", card_id: "AT-99" };
@@ -156,6 +207,108 @@ if (process.argv.includes("--serve")) {
     assert.doesNotMatch(h.root.querySelector("#task-list").innerHTML, /Проверить передачу/);
     h.run('taskSearch = "нет-такого"; renderTasks()');
     assert.match(h.root.querySelector("#task-list").innerHTML, /Ничего не найдено/);
+  });
+  test("queue searches assignment number, recipient and full prompt across projects", () => {
+    const state = fixture(); state.tasks[0].card_id = "AT-42";
+    Object.assign(state.todos[0], { purpose: "assignment", assignment_epoch: 2, to: "Ret", message: "Проверить редкий сценарий восстановления", acked_at: null });
+    const h = harness(state);
+    for (const query of ["AT-42", "ret восстанов", "AD-7", "редкий"]) {
+      h.ctx.__query = query;
+      h.run('project = "Other"; todoSearch = __query; renderTodos()');
+      const html = h.root.querySelector("#todo-table tbody").innerHTML;
+      assert.match(html, /AT-42/);
+      assert.match(html, /Ret/);
+      assert.doesNotMatch(html, /<button/);
+    }
+    h.run('todoSearch = "неизвестное"; renderTodos()');
+    assert.match(h.root.querySelector("#todo-empty").textContent, /Ничего не найдено/);
+  });
+  test("queue separates owner actions from waiting receipts, with safe resend", async () => {
+    const state = fixture(); Object.assign(state.todos[0], { acked_at: null, forwarded_at: "forwarded" });
+    const h = harness(state);
+    h.run('renderTodos()');
+    assert.doesNotMatch(h.root.querySelector("#todo-table tbody").innerHTML, /data-todo="7"/);
+    h.run('todoFilter = "waiting"; renderTodos()');
+    assert.match(h.root.querySelector("#todo-table tbody").innerHTML, /переслано · ожидает получения/);
+    const before = JSON.stringify(state.todos[0]);
+    h.run('globalThis.copied = ""; copyText = async text => { copied = text; return true; }; api = async () => { throw new Error("Copy must not send a receipt"); }; selected = { type: "todo", id: 7 };');
+    await h.run('ACTIONS["copy-message"]()');
+    assert.equal(h.run('copied'), state.todos[0].message);
+    assert.equal(JSON.stringify(state.todos[0]), before);
+  });
+  test("queue rows replace actions with elapsed creation time and expose a menu", () => {
+    const state = fixture(); state.todos[0].created = new Date(Date.now() - 125 * 60000).toISOString();
+    state.todos[0].updated = new Date().toISOString();
+    const h = harness(state); h.run('todoFilter = "all"; renderTodos()');
+    const html = h.root.querySelector("#todo-table tbody").innerHTML;
+    assert.doesNotMatch(html, /<button|row-actions/);
+    assert.match(html, /aria-haspopup="menu"/);
+    assert.match(html, /<time[^>]*datetime="[^"]+"[^>]*>2 ч 5 мин<\/time>/);
+    assert.match(fs.readFileSync(path.join(__dirname, "index.html"), "utf8"), /<th[^>]*>Когда<\/th>/);
+  });
+  test("todo menu mirrors receipt and offline gates with labelled icons", () => {
+    const state = fixture(); Object.assign(state.todos[0], { acked_at: null, forwarded_at: null });
+    const h = harness(state); const menu = h.root.querySelector("#todo-context-menu");
+    h.run('renderTodoMenu(data.todos[0])');
+    const copy = menu.querySelector('[data-action="copy-message"]');
+    const forwarded = menu.querySelector('[data-action="mark-forwarded"]');
+    const done = menu.querySelector('[data-action="done-selected"]');
+    assert.equal(copy.disabled, false); assert.equal(forwarded.disabled, false); assert.equal(done.disabled, false);
+    assert.equal(copy.dataset.todoId, "7");
+    h.run('online = false; renderTodoMenu(data.todos[0])');
+    assert.equal(copy.disabled, false); assert.equal(forwarded.disabled, true); assert.equal(done.disabled, true);
+    h.run('online = true; data.todos[0].acked_at = "received"; data.todos[0].done_at = "closed"; renderTodoMenu(data.todos[0])');
+    assert.equal(copy.disabled, false); assert.equal(forwarded.disabled, true); assert.equal(done.disabled, true);
+    h.run('data.todos[0].superseded_by = "new-message"; renderTodoMenu(data.todos[0])');
+    assert.equal(copy.disabled, true);
+    const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
+    assert.match(html, /id="todo-context-menu"[^>]*role="menu"/);
+    for (const icon of ["notepad_file-0.png", "envelope_closed-0.png", "check-0.png", "notepad-1.png"]) assert.ok(html.includes(icon));
+  });
+  test("Ctrl+C copies the selected visible card without stealing text editing or selection", async () => {
+    const state = fixture(); state.todos[0].forward_text = "FULL PROMPT AND ACK";
+    const h = harness(state); h.root.querySelector("#modal-layer").classList.add("hidden");
+    h.run('selected = {type:"todo",id:7}; todoFilter = "all"; globalThis.copied = ""; copyText = async text => { copied = text; return true; };');
+    let prevented = 0;
+    const target = { closest: () => null };
+    const event = { key: "c", code: "KeyC", ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, target, preventDefault() { prevented++; } };
+    h.ctx.__event = event;
+    await h.run('copySelectedTodo(__event)');
+    assert.equal(h.run('copied'), "FULL PROMPT AND ACK"); assert.equal(prevented, 1);
+    for (const mode of ["editor", "dialog", "text", "hidden", "agent"]) {
+      h.run('copied = ""; selected = {type:"todo",id:7}; todoFilter = "all";');
+      h.root.querySelector("#modal-layer").classList.add("hidden");
+      h.ctx.document.getSelection = () => ({ isCollapsed: true });
+      event.target = { closest: () => mode === "editor" ? {} : null };
+      if (mode === "dialog") h.root.querySelector("#modal-layer").classList.remove("hidden");
+      if (mode === "text") h.ctx.document.getSelection = () => ({ isCollapsed: false });
+      if (mode === "hidden") h.run('todoSearch = "does-not-match"');
+      if (mode === "agent") h.run('todoSearch = ""; selected = {type:"agent",id:"Demo/Codex"}');
+      const before = prevented; await h.run('copySelectedTodo(__event)');
+      assert.equal(prevented, before, mode); assert.equal(h.run('copied'), "", mode);
+    }
+  });
+  test("task search finds prompt and linked message number with one-click copy", async () => {
+    const state = fixture(); const task = state.tasks[0]; task.card_id = "AT-42";
+    task.assignment_message_id = state.todos[0].message_id;
+    Object.assign(state.todos[0], { purpose: "assignment", assignment_epoch: task.assignment.epoch, message: "Промпт без обрезки", forward_text: "[Agent Desk] Полный промпт и квитанция", to: task.assignment.agent });
+    task.prompt = state.todos[0].message;
+    const h = harness(state);
+    for (const query of ["без обрезки", "AD-7", "AT-42"]) {
+      h.ctx.__query = query;
+      h.run('project = "Other"; taskSearch = __query; renderTasks()');
+      assert.match(h.root.querySelector("#task-list").innerHTML, /data-task-action="copy"/);
+      assert.match(h.root.querySelector("#task-list").innerHTML, /AT-42/);
+    }
+    h.run('globalThis.copied = ""; copyText = async text => { copied = text; return true; }; api = async () => { throw new Error("No mutation for copying"); };');
+    await h.run('copyTaskPrompt(data.tasks[0])');
+    assert.equal(h.run('copied'), state.todos[0].forward_text);
+  });
+  test("old tasks label metadata copying honestly when no assignment prompt exists", () => {
+    const h = harness(); h.run("renderTasks()");
+    const html = h.root.querySelector("#task-list").innerHTML;
+    assert.match(html, /data-task-action="copy"[^>]*>Копировать контекст</);
+    assert.doesNotMatch(html, /Копировать задание для/);
   });
   test("file mailbox is an optional menu, not a primary work tab", () => {
     const h=harness();h.run("render()");assert.doesNotMatch(h.root.querySelector("#tabs").innerHTML,/Общая почта|tab-mail/);
@@ -200,6 +353,27 @@ if (process.argv.includes("--serve")) {
     for (const [id, value] of Object.entries({ "#task-project": "Demo", "#task-title": "New task", "#assign-agent": "Codex", "#assign-device_id": "fixture-pc", "#assign-session_id": "new-session", "#assign-role": "executor" })) n.querySelector(id).value = value;
     await submit(h); assert.equal(calls[0].url, "/api/tasks/assign"); assert.equal(calls[0].body.assignment.session_id, "new-session"); assert.equal(calls[0].body.assignment.adapter, "manual"); assert.equal(calls[0].body.title, "New task"); assert.equal(calls[0].body.task_id, undefined);
   });
+  test("oversized pasted prompt remains in the form with an error and no request", async () => {
+    const h = harness(); let calls = 0;
+    h.ctx.__api = async () => { calls++; return {}; };
+    h.run('api = __api; taskMutationDialog("assign", null)');
+    const node = h.mounted.at(-1).node;
+    node.querySelector("#task-prompt").value = "x".repeat(20000) + "END";
+    await submit(h);
+    assert.equal(calls, 0);
+    assert.match(node.querySelector("#task-error").textContent, /20 000/);
+    assert.ok(node.querySelector("#task-prompt").value.endsWith("END"));
+    assert.doesNotMatch(h.mounted.at(-1).html, /id="task-prompt"[^>]*maxlength/);
+  });
+  test("new manual assignment pre-fills a unique session and keeps binding controls optional", () => {
+    const h = harness(); h.run('taskMutationDialog("assign", null)');
+    const first = h.mounted.at(-1);
+    const session = first.node.querySelector("#assign-session_id").value;
+    assert.match(session, /^manual-[a-f0-9]{32}$/);
+    assert.match(first.html, /<details><summary>Привязка сессии и роль/);
+    h.run('taskMutationDialog("assign", null)');
+    assert.notEqual(h.mounted.at(-1).node.querySelector("#assign-session_id").value, session);
+  });
   test("transition sends exact bound reporter and epoch, not ACK", async () => {
     const h = harness(); const calls = []; h.ctx.__api = async (url, body) => { calls.push({ url, body }); return {}; }; h.run('api = __api; taskMutationDialog("transition", data.tasks[0])'); h.mounted.at(-1).node.querySelector("#task-state").value = "accepted";
     await submit(h); const body = calls[0].body; assert.equal(body.agent, "Codex"); assert.equal(body.device_id, "fixture-pc"); assert.equal(body.session_id, "demo-session-a"); assert.equal(body.assignment_epoch, 2); assert.equal(body.state, "accepted"); assert.equal(body.ack, undefined);
@@ -238,7 +412,7 @@ if (process.argv.includes("--serve")) {
   test("UI mutation bodies are accepted by the real TaskService in a purely in-memory desk", async () => {
     const { TaskService } = require("../core/tasks.js");
     let saves = 0;
-    const desk = { config: { device_id: "fixture-pc", watch: [] }, state: { tasks: {}, bindings: {} }, _saveState() { saves++; }, emit() {} };
+    const desk = { config: { device_id: "fixture-pc", watch: [] }, state: { tasks: {}, bindings: {}, todos: [], next_id: 1 }, _saveState() { saves++; }, emit() {} };
     const service = new TaskService(desk);
     const state = fixture(); state.tasks = []; state.todos = [];
     const h = harness(state);
