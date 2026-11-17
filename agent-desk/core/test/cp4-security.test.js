@@ -102,20 +102,22 @@ test("CP4 Security: route-level scope isolation strips keys, pairing codes, and 
     assert.equal(phoneState.json.verified_capabilities.local_owner, false);
     assert.equal(phoneState.json.verified_capabilities.repo_roots_approved, false);
 
-    // Zero keys, zero 6-digit pairing codes, zero internal PC paths in lan_phone responses!
-    for (const secretOrPath of [desk.config.key, desk.config.agent_key, "654321", inbox, repoDir, skillDir, mailDir]) {
-      assert.ok(!phoneState.text.includes(secretOrPath), `lan_phone /api/state leaked: ${secretOrPath}`);
+    // Zero keys, zero 6-digit pairing codes, zero internal PC paths (both raw and JSON-escaped) in lan_phone responses!
+    for (const secretOrPath of [desk.config.key, desk.config.agent_key, "654321", inbox, repoDir, skillDir, mailDir, "secret-pc-"]) {
+      const jsonEscaped = JSON.stringify(secretOrPath).slice(1, -1);
+      assert.ok(!phoneState.text.includes(secretOrPath) && !phoneState.text.includes(jsonEscaped), `lan_phone /api/state leaked: ${secretOrPath}`);
     }
 
     const phoneCompact = await callHttp(port, { path: "/api/state?compact=1", headers: phoneHeaders });
     const phoneMail = await callHttp(port, { path: "/api/mail", headers: phoneHeaders });
-    const phoneItem = await callHttp(port, { path: `/api/item?task=${task.task_id}`, headers: phoneHeaders });
+    const phoneItem = await callHttp(port, { path: `/api/item?task=${task.task_id}&todo=1`, headers: phoneHeaders });
     const phoneCtx = await callHttp(port, { path: `/api/tasks/context?id=${task.task_id}`, headers: phoneHeaders });
     const phoneDiag = await callHttp(port, { path: "/api/diagnostics", headers: phoneHeaders });
     for (const [label, res] of [["compact", phoneCompact], ["mail", phoneMail], ["item", phoneItem], ["context", phoneCtx], ["diag", phoneDiag]]) {
       assert.equal(res.status, 200, label);
-      for (const secretOrPath of [desk.config.key, desk.config.agent_key, inbox, repoDir, skillDir, mailDir]) {
-        assert.ok(!res.text.includes(secretOrPath), `lan_phone ${label} leaked: ${secretOrPath}`);
+      for (const secretOrPath of [desk.config.key, desk.config.agent_key, inbox, repoDir, skillDir, mailDir, "secret-pc-"]) {
+        const jsonEscaped = JSON.stringify(secretOrPath).slice(1, -1);
+        assert.ok(!res.text.includes(secretOrPath) && !res.text.includes(jsonEscaped), `lan_phone ${label} leaked: ${secretOrPath}`);
       }
     }
 

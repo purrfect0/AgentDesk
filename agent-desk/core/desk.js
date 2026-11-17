@@ -1394,6 +1394,15 @@ class Desk extends EventEmitter {
     };
   }
 
+  _scopeTodo(todo, auth = { local: true }) {
+    if (!todo || auth?.local) return todo;
+    const copy = { ...todo };
+    if (typeof copy.message === "string") copy.message = this._redactLocalPaths(copy.message);
+    if (typeof copy.forward_text === "string") copy.forward_text = this._redactLocalPaths(copy.forward_text);
+    if (typeof copy.message_preview === "string") copy.message_preview = this._redactLocalPaths(copy.message_preview);
+    return copy;
+  }
+
   _compactTodo(t) {
     const { message, ...rest } = t;
     const msg = String(message || "");
@@ -1526,7 +1535,7 @@ class Desk extends EventEmitter {
     return {
       ...base,
       tasks: this.tasks.list().map((t) => this._scopeTask(this.tasks.enrich(t), auth)),
-      todos: s.todos.map((t) => ({ ...t, forward_text: forwardText(t) })),
+      todos: s.todos.map((t) => this._scopeTodo({ ...t, forward_text: forwardText(t) }, auth)),
       events: s.events.slice(-LIMITS.payloadEvents).map(({ message, ...e }) => e),
     };
   }
@@ -1544,7 +1553,7 @@ class Desk extends EventEmitter {
         compact: true,
         delta: false,
         tasks: idx.tasksList.map((t) => this._scopeTask(t, auth)),
-        todos: idx.todosList,
+        todos: auth?.local ? idx.todosList : idx.todosList.map((t) => this._scopeTodo(t, auth)),
         events: idx.evSlice,
       };
     }
@@ -1558,7 +1567,9 @@ class Desk extends EventEmitter {
         .filter((t) => (this._entityVersions.get(`task:${t.task_id}`)?.ver ?? idx.version) > sinceVersion)
         .map((t) => this._scopeTask(t, auth)),
       tasks_remove: this._removedEntities.filter((r) => r.kind === "task" && r.ver > sinceVersion).map((r) => r.id),
-      todos_upsert: idx.todosList.filter((t) => (this._entityVersions.get(`todo:${t.id}`)?.ver ?? idx.version) > sinceVersion),
+      todos_upsert: idx.todosList
+        .filter((t) => (this._entityVersions.get(`todo:${t.id}`)?.ver ?? idx.version) > sinceVersion)
+        .map((t) => this._scopeTodo(t, auth)),
       todos_remove: this._removedEntities.filter((r) => r.kind === "todo" && r.ver > sinceVersion).map((r) => r.id),
       events_unchanged: eventsUnchanged,
       events: eventsUnchanged ? [] : idx.evSlice,
@@ -1586,7 +1597,7 @@ class Desk extends EventEmitter {
     }
     if (!todo && !taskObj) return null;
     return {
-      todo: todo ? { ...todo, forward_text: forwardText(todo) } : null,
+      todo: todo ? this._scopeTodo({ ...todo, forward_text: forwardText(todo) }, auth) : null,
       task: taskObj ? this._scopeTask(this.tasks.enrich(taskObj), auth) : null,
     };
   }
