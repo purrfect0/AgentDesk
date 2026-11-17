@@ -11,6 +11,7 @@ const os = require("node:os");
 const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const { SyncJournal, stableId, UUID } = require("./sync.js");
+const { classifyRuntimeRejection, MARKER_TEMPLATES } = require("./marker-schema.js");
 
 const VERSION = "2.3.3"; // the app version, the same as in package.json (a test checks it)
 const PROTOCOL = 3;
@@ -346,6 +347,7 @@ class Desk extends EventEmitter {
     this.timer = null;
     this.server = null;
     this.lastCleanup = 0;
+    this.lastPhoneSeenAt = null;
     fs.mkdirSync(this.dataDir, { recursive: true });
     this._load();
     this.port = o.port ?? this.config.port;
@@ -387,10 +389,20 @@ class Desk extends EventEmitter {
       port: 8098, lan: true, notify: true, popup_sound: true, popup_volume: 80, stale_minutes: 90, autostart: true,
       retention_days: 0, watch: [{ path: path.join(this.dataDir, "markers"), project: "" }],
       agents: {}, aliases: {}, allowed_hosts: [], file_sync_enabled: false,
+      quiet_hours: { enabled: false, start: "23:00", end: "08:00" }, notify_projects: {},
       ...cfg,
     };
     const c = this.config;
     c.file_sync_enabled = c.file_sync_enabled === true;
+    const hhmmRe = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+    c.quiet_hours = {
+      enabled: c.quiet_hours?.enabled === true,
+      start: hhmmRe.test(String(c.quiet_hours?.start || "")) ? String(c.quiet_hours.start) : "23:00",
+      end: hhmmRe.test(String(c.quiet_hours?.end || "")) ? String(c.quiet_hours.end) : "08:00",
+    };
+    c.notify_projects = c.notify_projects && typeof c.notify_projects === "object" && !Array.isArray(c.notify_projects)
+      ? Object.fromEntries(Object.entries(c.notify_projects).slice(0, 60).map(([k, v]) => [oneLine(k, 60), v !== false]).filter(([k]) => k))
+      : {};
     if (!isStrongKey(c.key)) c.key = newKey(); // old 48-bit Agent Board keys are replaced
     if (!isStrongKey(c.agent_key)) c.agent_key = newKey(); // separate loopback-only agent API credential
     c.watch = (Array.isArray(c.watch) ? c.watch : [])
@@ -551,13 +563,34 @@ class Desk extends EventEmitter {
    * Something needs the owner. Always recorded: the PC shows a popup only when config.notify is on,
    * the phone asks GET /api/alerts on its own. `action` says what to do, in a few words.
    */
+  _inQuietHours(nowDate = new Date()) {
+    const q = this.config.quiet_hours;
+    if (!q || !q.enabled) return false;
+    const toMins = (s) => { const [h, m] = String(s || "00:00").split(":").map(Number); return (h * 60) + m; };
+    const start = toMins(q.start), end = toMins(q.end);
+    const cur = nowDate.getHours() * 60 + nowDate.getMinutes();
+    if (start === end) return true;
+    return start < end ? (cur >= start && cur <= end) : (cur >= start || cur <= end);
+  }
+
   _alert(kind, project, title, body, todoId, extra = {}) {
     const s = this.state;
+    const normTitle = String(title).slice(0, 200);
+    const normBody = String(body || "").slice(0, 600);
+    if (todoId !== null && todoId !== undefined) {
+      const openTodo = s.todos.find((t) => t.id === todoId && !t.done_at);
+      const dup = s.alerts.findLast((prev) => prev.todo === todoId && prev.kind === kind && prev.title === normTitle && prev.body === normBody && prev.receipt_epoch === (openTodo?.receipt_epoch || 0));
+      if (dup) return;
+    }
+    const projectMuted = Boolean(project && this.config.notify_projects?.[project] === false);
+    const suppressed = Boolean(projectMuted || this._inQuietHours());
+    const openTodo = todoId !== null && todoId !== undefined ? s.todos.find((t) => t.id === todoId) : null;
     s.alert_seq += 1;
     const a = {
-      id: s.alert_seq, kind, project, title: String(title).slice(0, 200), body: String(body || "").slice(0, 600),
+      id: s.alert_seq, kind, project, title: normTitle, body: normBody,
       action: String(extra.action || "").slice(0, 200), agent: extra.agent || null, to: extra.to || null,
-      icon: ALERT_ICON[kind] || "msg_information-0", todo: todoId ?? null, time: nowIso(),
+      icon: ALERT_ICON[kind] || "msg_information-0", todo: todoId ?? null, receipt_epoch: openTodo?.receipt_epoch || 0,
+      suppressed, time: nowIso(),
     };
     s.alerts.push(a);
     if (s.alerts.length > LIMITS.alerts) s.alerts.splice(0, s.alerts.length - LIMITS.alerts);
@@ -781,20 +814,34 @@ class Desk extends EventEmitter {
     s.todos = s.todos.filter((t) => !t.done_at || pinned.has(t.message_id) || keep.has(t));
   }
 
-  _reject(file, folder, project, error) {
+  _reject(file, folder, project, error, rawText = "") {
     const name = path.basename(file);
     let moved = "";
+    const diag = classifyRuntimeRejection(error, rawText, project, this.state.tasks);
     try {
       moved = this._archive(file, folder, "bad");
-      fs.writeFileSync(`${moved}.error.txt`, `${error}\n`, "utf8");
+      fs.writeFileSync(`${moved}.error.txt`, `${error}\ncode: ${diag.code}\nfield: ${diag.field}\nexpected: ${(diag.expected || []).join(", ")}\nhint: ${diag.hint}\n`, "utf8");
     } catch (e) {
       this.log("cannot move bad marker", file, e.message);
     }
     const s = this.state;
-    s.rejected.push({ time: nowIso(), file: name, folder, project, error: String(error).slice(0, 300), moved_to: moved });
+    s.rejected.push({
+      time: nowIso(),
+      file: name,
+      folder,
+      project: diag.project || project || "",
+      seq: diag.seq,
+      code: diag.code,
+      field: diag.field,
+      expected: diag.expected,
+      hint: diag.hint,
+      retryable: diag.retryable,
+      error: String(error).slice(0, 300),
+      moved_to: moved,
+    });
     if (s.rejected.length > LIMITS.rejected) s.rejected.splice(0, s.rejected.length - LIMITS.rejected);
     this.dirty = true;
-    this._alert("bad", project || "", `Маркер отклонён: ${name}`, error, null, { action: "Исправьте маркер: файл не прошёл проверку" });
+    this._alert("bad", diag.project || project || "", `Маркер отклонён: ${name}`, `${error} (${diag.hint})`, null, { action: diag.hint || "Исправьте маркер: файл не прошёл проверку" });
   }
 
   _archive(file, folder, sub) {
@@ -860,7 +907,7 @@ class Desk extends EventEmitter {
           }
           if (Date.now() - p.first < this.graceMs) continue;
           this.pending.delete(f);
-          this._reject(f, w.path, w.project, e.message);
+          this._reject(f, w.path, w.project, e.message, raw);
           changed = true;
           continue;
         }
@@ -871,7 +918,7 @@ class Desk extends EventEmitter {
           try { this.applyEvent(ev); this._remember(id); }
           catch (e) {
             this.state = before;
-            this._reject(f, w.path, w.project, e.message);
+            this._reject(f, w.path, w.project, e.message, raw);
             changed = true; continue;
           }
           this.dirty = true;
@@ -953,6 +1000,77 @@ class Desk extends EventEmitter {
     return { ...this.mail.diagnostics(), enabled: true };
   }
 
+  phoneStatus() {
+    const connected = Boolean(this.lastPhoneSeenAt && Date.now() - Date.parse(this.lastPhoneSeenAt) < 90000);
+    return {
+      connected,
+      waiting_pollers: this._waiters.size,
+      last_seen_at: this.lastPhoneSeenAt,
+    };
+  }
+
+  diagnosticsExport() {
+    const s = this.state;
+    const linkPayload = this.peers.payload();
+    const queuedEvents = (linkPayload.peers || []).reduce((sum, p) => sum + (p.pending_events || 0), 0);
+    const rejectedByCode = {};
+    const rejectedByField = {};
+    for (const r of s.rejected) {
+      const c = r.code || "MARKER_REJECTED";
+      const f = r.field || "marker";
+      rejectedByCode[c] = (rejectedByCode[c] || 0) + 1;
+      rejectedByField[f] = (rejectedByField[f] || 0) + 1;
+    }
+    const tasksByState = {};
+    const tasksByOrigin = {};
+    for (const t of Object.values(s.tasks || {})) {
+      tasksByState[t.state] = (tasksByState[t.state] || 0) + 1;
+      const orig = this.tasks.originKind(t);
+      tasksByOrigin[orig] = (tasksByOrigin[orig] || 0) + 1;
+    }
+    return {
+      generated_at: nowIso(),
+      app: { name: "Agent Desk", version: VERSION, protocol: PROTOCOL },
+      redacted: true,
+      pipeline: {
+        pending: this.pending.size,
+        queued: queuedEvents,
+        rejected: s.rejected.length,
+        applied: s.events.length,
+        acked: s.todos.filter((t) => t.acked_at).length,
+      },
+      rejected_by_code: rejectedByCode,
+      rejected_by_field: rejectedByField,
+      recent_rejections: s.rejected.slice(-20).map((r) => ({
+        time: r.time,
+        code: r.code || "MARKER_REJECTED",
+        field: r.field || "marker",
+        expected: r.expected || [],
+        hint: r.hint || "",
+        retryable: Boolean(r.retryable),
+        seq: r.seq ?? null,
+      })),
+      tasks_by_state: tasksByState,
+      tasks_by_origin: tasksByOrigin,
+      todos_summary: {
+        total: s.todos.length,
+        open: s.todos.filter((t) => !t.done_at).length,
+        forwarded: s.todos.filter((t) => t.forwarded_at).length,
+        acked: s.todos.filter((t) => t.acked_at).length,
+      },
+      sync: {
+        protocol: PROTOCOL,
+        base_seq: s.sync?.base_seq || 0,
+        baseline_entities: s.sync?.baseline?.length || 0,
+        tail_events: s.sync?.events?.length || 0,
+        paired_peers: (linkPayload.peers || []).length,
+        online_peers: (linkPayload.peers || []).filter((p) => p.online).length,
+      },
+      phone_status: this.phoneStatus(),
+      templates: Object.keys(MARKER_TEMPLATES),
+    };
+  }
+
   payload() {
     const s = this.state;
     const c = this.config;
@@ -966,13 +1084,22 @@ class Desk extends EventEmitter {
       mail: this.mailPayload(),
       todos: s.todos.map((t) => ({ ...t, forward_text: forwardText(t) })),
       events: s.events.slice(-LIMITS.payloadEvents).map(({ message, ...e }) => e),
-      rejected: s.rejected.slice(-20),
+      rejected: s.rejected.slice(-20).map(({ folder: _f, moved_to: _m, ...r }) => r),
+      pipeline: {
+        pending: this.pending.size,
+        queued: (this.peers.payload().peers || []).reduce((sum, p) => sum + (p.pending_events || 0), 0),
+        rejected: s.rejected.length,
+        applied: s.events.length,
+        acked: s.todos.filter((t) => t.acked_at).length,
+      },
+      phone_status: this.phoneStatus(),
       alert_seq: s.alert_seq,
-      alerts: s.alerts.slice(-10),
+      alerts: s.alerts.filter((a) => !a.suppressed).slice(-10),
       warnings: this.warnings,
       known_agents: Object.fromEntries([...projects].map((p) => [p, this.knownAgents(p)])),
       config: {
-        stale_minutes: c.stale_minutes, notify: c.notify, watch: c.watch, lan: c.lan, popup_sound: c.popup_sound,
+        stale_minutes: c.stale_minutes, notify: c.notify, quiet_hours: c.quiet_hours, notify_projects: c.notify_projects,
+        watch: c.watch, lan: c.lan, popup_sound: c.popup_sound,
         popup_volume: c.popup_volume, autostart: c.autostart, retention_days: c.retention_days, agents: c.agents, aliases: c.aliases,
         task_repo_roots: c.task_repo_roots || [], task_skill_roots: c.task_skill_roots || [], file_sync_enabled: this.fileSyncEnabled,
       },
@@ -1206,6 +1333,7 @@ class Desk extends EventEmitter {
         });
       }
       if (url.pathname === "/api/state") {
+        if (!auth.local || APP_ORIGINS.has(req.headers.origin)) this.lastPhoneSeenAt = nowIso();
         const since = Number(url.searchParams.get("since"));
         if (url.searchParams.has("since") && since === this.state.version) return this._send(res, 200, { unchanged: true, version: since }, cors);
         return this._send(res, 200, this.payload(), cors);
@@ -1214,7 +1342,11 @@ class Desk extends EventEmitter {
         const a = this.state.alerts.find((x) => String(x.id) === url.searchParams.get("id"));
         return a ? this._send(res, 200, a, cors) : this._send(res, 404, { error: "not found" }, cors);
       }
-      if (url.pathname === "/api/alerts") return this._waitAlerts(res, url, cors);
+      if (url.pathname === "/api/alerts") {
+        if (!auth.local || APP_ORIGINS.has(req.headers.origin)) this.lastPhoneSeenAt = nowIso();
+        return this._waitAlerts(res, url, cors);
+      }
+      if (url.pathname === "/api/diagnostics") return this._send(res, 200, this.diagnosticsExport(), cors);
       if (url.pathname === "/api/mail") return this._send(res, 200, this.mailPayload(), cors);
       if (url.pathname === "/api/tasks/context") {
         try { return this._send(res, 200, this.tasks.context(this._resolveTaskId(url.searchParams.get("id"))), cors); }
@@ -1277,7 +1409,7 @@ class Desk extends EventEmitter {
     const valid = url.searchParams.has("after") && Number.isInteger(after) && after >= 0 && after <= s.alert_seq;
     const answer = () => {
       if (res.writableEnded) return;
-      this._send(res, 200, { seq: s.alert_seq, alerts: valid ? s.alerts.filter((a) => a.id > after).slice(-20) : [] }, cors);
+      this._send(res, 200, { seq: s.alert_seq, alerts: valid ? s.alerts.filter((a) => a.id > after && !a.suppressed).slice(-20) : [] }, cors);
     };
     const wait = Math.min(30, Math.max(0, Number(url.searchParams.get("wait")) || 0));
     if (!valid || after < s.alert_seq || !wait) return answer();
@@ -1496,6 +1628,15 @@ class Desk extends EventEmitter {
     }
     for (const key of ["task_repo_roots", "task_skill_roots"]) if (key in body) c[key] = [...new Set(body[key])];
     for (const k of ["notify", "popup_sound", "autostart", "lan"]) if (typeof body[k] === "boolean") c[k] = body[k];
+    if (body.quiet_hours && typeof body.quiet_hours === "object" && !Array.isArray(body.quiet_hours)) {
+      const hhmmRe = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+      if ("enabled" in body.quiet_hours && typeof body.quiet_hours.enabled === "boolean") c.quiet_hours.enabled = body.quiet_hours.enabled;
+      if (hhmmRe.test(String(body.quiet_hours.start || ""))) c.quiet_hours.start = String(body.quiet_hours.start);
+      if (hhmmRe.test(String(body.quiet_hours.end || ""))) c.quiet_hours.end = String(body.quiet_hours.end);
+    }
+    if (body.notify_projects && typeof body.notify_projects === "object" && !Array.isArray(body.notify_projects)) {
+      c.notify_projects = Object.fromEntries(Object.entries(body.notify_projects).slice(0, 60).map(([k, v]) => [oneLine(k, 60), v !== false]).filter(([k]) => k));
+    }
     const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
     if (int(body.popup_volume, 0, 100)) c.popup_volume = body.popup_volume;
     if (int(body.stale_minutes, 1, 10080)) c.stale_minutes = body.stale_minutes;

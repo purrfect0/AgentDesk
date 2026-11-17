@@ -2,6 +2,7 @@
 "use strict";
 const fs = require("node:fs");
 const { AgentClient, AgentClientError, COMMANDS, MAX_INPUT, errorResult, parseObject } = require("./agent-client.js");
+const { diagnoseMarker, MARKER_TEMPLATES } = require("./marker-schema.js");
 
 const HELP = {
   ok: true,
@@ -94,8 +95,8 @@ function parseArguments(argv, { mcp = false } = {}) {
   }
   const command = positions.shift();
   if (command === "help") help = true;
-  if (!help && (!command || !Object.hasOwn(COMMANDS, command))) {
-    throw new AgentClientError("UNKNOWN_COMMAND", "Choose inbox, read, ack, submit, status, handoff, context, assign or transition; use --help.");
+  if (!help && (!command || (!Object.hasOwn(COMMANDS, command) && command !== "validate"))) {
+    throw new AgentClientError("UNKNOWN_COMMAND", "Choose inbox, read, ack, submit, status, handoff, context, assign, transition or validate; use --help.");
   }
   if (positions.length) {
     if (!["read", "context"].includes(command) || positions.length !== 1 || fields.id !== undefined) {
@@ -143,6 +144,16 @@ async function runCli(argv = process.argv.slice(2), { stdin = process.stdin, std
     const { command, options, fields, help } = parseArguments(argv);
     if (help) { stdout.write(`${JSON.stringify(HELP)}\n`); return 0; }
     const input = { ...await readInput(options, stdin), ...fields };
+    if (command === "validate") {
+      const diag = diagnoseMarker(input, fields.project || "");
+      if (diag.not_a_marker) {
+        stdout.write(`${JSON.stringify({ ok: false, errors: [{ code: "NOT_A_MARKER", field: "agent/state", expected: ["agent", "state"], hint: "Укажите хотя бы agent и state.", retryable: false, message: "Файл не распознан как маркер Agent Desk." }], templates: Object.keys(MARKER_TEMPLATES) })}\n`);
+        return 1;
+      }
+      const out = { ok: diag.ok, project: diag.project, seq: diag.seq, task_id: diag.task_id || null, errors: diag.errors };
+      stdout.write(`${JSON.stringify(out)}\n`);
+      return diag.ok ? 0 : 1;
+    }
     const client = new AgentClient(options);
     const value = await client.execute(command, input);
     stdout.write(`${JSON.stringify(value)}\n`);

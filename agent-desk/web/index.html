@@ -41,6 +41,7 @@
       <span class="menu-label"><u>В</u>ид</span>
       <div class="menu-list">
         <div class="menu-item" data-action="volume"><img src="icons/loudspeaker_rays-1.png" alt="">Громкость…</div>
+        <div class="menu-item" data-action="notify-settings"><img src="icons/loudspeaker_rays-1.png" alt="">Тихие часы и проекты…</div>
         <hr>
         <div class="menu-item" data-action="toggle-sound"><span class="check" id="sound-check"></span>Звук приложения</div>
         <div class="menu-item" data-action="toggle-notify"><span class="check" id="notify-check"></span>Всплывающие окна на ПК</div>
@@ -55,6 +56,7 @@
       <span class="menu-label"><u>С</u>правка</span>
       <div class="menu-list">
         <div class="menu-item" data-action="howto"><img src="icons/help_book_small-1.png" alt="">Инструкция для агентов…</div>
+        <div class="menu-item" data-action="diagnostics"><img src="icons/msg_warning-2.png" alt="">Диагностика и отказы…</div>
         <hr>
         <div class="menu-item" data-action="about">О программе</div>
       </div>
@@ -87,6 +89,7 @@
         <input type="search" id="todo-search" aria-label="Найти задание во всех проектах" placeholder="Номер, задание, агент или слова из промпта…" autocomplete="off" spellcheck="false">
         <button data-action="clear-todo-search" id="clear-todo-search" hidden>Сбросить поиск</button>
       </div>
+      <div id="owner-actions" class="owner-actions hidden" role="group" aria-label="Доступные действия владельца"></div>
       <p id="todo-search-hint" class="sub" hidden>Поиск по всем сообщениям и проектам, включая закрытые.</p>
       <p id="copy-status" class="sub" role="status" aria-live="polite"></p>
       <div class="sunken-panel todo-panel">

@@ -34,13 +34,15 @@
       "core/peers.js",
       "core/sync.js",
       "core/tasks.js",
+      "core/marker-schema.js",
       "core/mail.js",
       "core/agent-client.js",
       "core/cli.js",
       "core/mcp.js",
       "desktop/**",
       "web/**",
-      "!web/**/*.md"
+      "!web/**/*.md",
+      "!web/**/*.test.js"
     ],
     "extraFiles": [
       { "from": "desktop/agentdesk.cmd", "to": "agentdesk.cmd" },

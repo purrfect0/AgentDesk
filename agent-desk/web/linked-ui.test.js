@@ -46,7 +46,7 @@ if (process.argv.includes("--serve")) {
     const relative = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
     const file = path.resolve(__dirname, `.${relative}`);
     if (!file.startsWith(__dirname + path.sep) || file === __filename) return res.writeHead(403).end();
-    const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".woff2": "font/woff2" };
+    const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".woff": "font/woff", ".woff2": "font/woff2" };
     try { res.writeHead(200, { "Content-Type": mime[path.extname(file)] || "application/octet-stream" }); res.end(fs.readFileSync(file)); } catch { res.writeHead(404).end(); }
   });
   const port = Number(process.argv[process.argv.indexOf("--serve") + 1]) || 18098;
@@ -465,5 +465,260 @@ if (process.argv.includes("--serve")) {
     h.ctx.__lastTask = state.tasks.at(-1);
     h.run('taskDetails(__lastTask)');
     assert.match(h.mounted.at(-1).html, /Тестовая причина отмены/);
+  });
+
+  // Minimal semantic HTML tag/attribute inspector so CP3 UI tests verify DOM meaning, not raw JS source strings.
+  const unescHtml = (s) => String(s || "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  function inspectDom(html) {
+    const buttons = [];
+    for (const bm of html.matchAll(/<button([^>]*)>([\s\S]*?)<\/button>/gi)) {
+      const attrs = {};
+      for (const am of (bm[1] || "").matchAll(/([a-z0-9_:-]+)(?:="([^"]*)")?/gi)) attrs[am[1].toLowerCase()] = unescHtml(am[2] ?? "");
+      buttons.push({ name: "button", attrs, inner: bm[2], text: unescHtml(bm[2].replace(/<[^>]*>/g, "")).trim() });
+    }
+    const dlPairs = {};
+    for (const dm of html.matchAll(/<dt>([\s\S]*?)<\/dt>\s*<dd>([\s\S]*?)<\/dd>/gi)) {
+      dlPairs[unescHtml(dm[1].replace(/<[^>]*>/g, "")).trim()] = unescHtml(dm[2].replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
+    }
+    return {
+      dlPairs,
+      buttons,
+      byAction: (act) => buttons.find((t) => t.attrs["data-action"] === act || t.attrs["data-task-action"] === act) || null,
+    };
+  }
+
+  test("CP3 UI: main view exposes contextual actions strictly when backing data exists", async () => {
+    const state = fixture();
+    state.tasks[0].state = "accepted";
+    state.todos[0].acked_at = new Date().toISOString();
+    const h = harness(state);
+    h.run("render()");
+    assert.equal(h.root.querySelector("#owner-actions").classList.contains("hidden"), true);
+    assert.equal(h.root.querySelector("#owner-actions").innerHTML, "");
+
+    // 1. Assignment forward appears -> only quick-forward-assignment
+    const now = new Date().toISOString();
+    state.todos.push({
+      id: 21, display_id: "AD-21", message_id: "aaaaaaaa-1111-4111-8111-111111111111",
+      task_id: taskId, project: "Demo", agent: "Владелец", to: "Carbon", kind: "forward",
+      purpose: "assignment", assignment_epoch: 3, message: "Промпт задания",
+      forward_text: "[Agent Desk] Задание для Carbon · message_id: aaaaaaaa-1111-4111-8111-111111111111",
+      created: now,
+    });
+    h.run("render()");
+    let dom = inspectDom(h.root.querySelector("#owner-actions").innerHTML);
+    assert.equal(h.root.querySelector("#owner-actions").classList.contains("hidden"), false);
+    assert.ok(dom.byAction("quick-forward-assignment"));
+    assert.equal(dom.byAction("quick-forward-report"), null);
+    assert.equal(dom.byAction("quick-reply"), null);
+    assert.equal(dom.byAction("quick-review"), null);
+    assert.equal(dom.byAction("quick-resource"), null);
+
+    h.run('globalThis.__copied = ""; copyText = async (t) => { __copied = t; return true; };');
+    await h.run('ACTIONS["quick-forward-assignment"]()');
+    assert.equal(h.run("__copied"), state.todos[1].forward_text);
+
+    // 2. Report forward + reply + submitted task + resource-waiting agent -> all 5 contextual actions
+    state.todos.push(
+      { id: 22, display_id: "AD-22", message_id: "bbbbbbbb-2222-4222-8222-222222222222", project: "Demo", agent: "Carbon", to: "Codex", kind: "forward", message: "Отчёт готов", forward_text: "[Agent Desk] Отчёт для Codex", created: now },
+      { id: 23, display_id: "AD-23", message_id: "cccccccc-3333-4333-8333-333333333333", project: "Demo", agent: "Astra", kind: "reply", message: "Нужно решение", created: now },
+    );
+    state.tasks[0].state = "submitted";
+    state.agents["Demo/Codex"] = { project: "Demo", agent: "Codex", state: "waiting", waiting_for: "resource", task: "Жду телефон", first_seen: now, updated: now, device_id: "fixture-pc" };
+    h.run('tab = "tasks"; render()');
+    dom = inspectDom(h.root.querySelector("#owner-actions").innerHTML);
+    for (const act of ["quick-forward-assignment", "quick-forward-report", "quick-reply", "quick-review", "quick-resource"]) {
+      assert.ok(dom.byAction(act), `expected contextual action ${act}`);
+    }
+    const cardDom = inspectDom(h.root.querySelector("#task-list").innerHTML);
+    assert.ok(cardDom.byAction("review"));
+    assert.ok(cardDom.byAction("release-resource"));
+    assert.doesNotMatch(h.root.querySelector("#todo-table tbody").innerHTML, /<button/);
+
+    await h.run('ACTIONS["quick-forward-report"]()');
+    assert.equal(h.run("__copied"), "[Agent Desk] Отчёт для Codex");
+    h.run('ACTIONS["quick-review"]()');
+    assert.equal(h.mounted.at(-1).node.querySelector("#task-state").value, "accepted");
+    h.run('ACTIONS["quick-resource"]()');
+    assert.match(h.mounted.at(-1).node.querySelector("#resource-resume-text").value, /Ресурс свободен/);
+  });
+
+  test("CP3 UI: task cards expose executor, device, last signal, stale reason, reviewer, report/SHA, artifact availability and history", () => {
+    const state = fixture();
+    const staleIso = new Date(Date.now() - 45 * 60000).toISOString();
+    state.agents["Demo/Codex"] = { project: "Demo", agent: "Codex", state: "working", task: "Проверить", first_seen: staleIso, updated: staleIso, device_id: "fixture-pc", session_id: "demo-session-a" };
+    state.tasks[0].artifacts = [
+      { path: "reports/review.md", sha256: "a".repeat(64), status: "verified", local_availability: "available_verified" },
+    ];
+    const h = harness(state);
+    h.run("renderTasks()");
+    const html = h.root.querySelector("#task-list").innerHTML;
+    const dom = inspectDom(html);
+    assert.match(dom.dlPairs["Исполнитель"], /Codex · исполнитель/);
+    assert.match(dom.dlPairs["Компьютер"], /этот компьютер/);
+    assert.match(dom.dlPairs["Последний сигнал"], /нет новых маркеров > 20 мин — активность не подтверждена/);
+    assert.match(dom.dlPairs["Проверяет"], /Reviewer · ведущий/);
+    assert.match(dom.dlPairs["Отчёт \/ SHA"], /reports\/review\.md/);
+    assert.match(dom.dlPairs["Отчёт \/ SHA"], /SHA abcdef123456/);
+    assert.match(dom.dlPairs["Отчёт \/ SHA"], /доступен на этом ПК, SHA совпал ✓/);
+    assert.equal(dom.dlPairs["Следующий шаг"], "Продолжить проверку UI");
+    assert.match(html, /<summary>История действий \(2\)<\/summary>/);
+
+    // Check remaining availability statuses in taskDetails
+    state.tasks[0].artifacts = [
+      { path: "out/a.txt", sha256: "b".repeat(64), local_availability: "hash_mismatch" },
+      { path: "out/b.txt", sha256: "c".repeat(64), local_availability: "other_device" },
+      { path: "out/c.txt", sha256: "d".repeat(64), local_availability: "unapproved_root" },
+    ];
+    h.run("taskDetails(data.tasks[0])");
+    const detailHtml = h.mounted.at(-1).html;
+    assert.match(detailHtml, /SHA не совпадает на этом ПК/);
+    assert.match(detailHtml, /на другом компьютере/);
+    assert.match(detailHtml, /путь вне разрешённых папок контекста/);
+  });
+
+  test("CP3 UI: prompt counter, UTF-8 envelope overflow, draft protection, manual clipboard fallback and exact whitespace/CRLF/emoji/Cyrillic preservation", async () => {
+    const { TaskService } = require("../core/tasks.js");
+    const { forwardText: buildForwardText } = require("../core/desk.js");
+    const desk = { config: { device_id: "fixture-pc", watch: [] }, state: { tasks: {}, bindings: {}, todos: [], next_id: 1 }, _saveState() {}, emit() {} };
+    const service = new TaskService(desk);
+    const state = fixture(); state.tasks = []; state.todos = [];
+    const h = harness(state);
+    h.ctx.__api = async (url, body) => service[url.split("/").pop()](body);
+    h.run('api = __api; taskMutationDialog("assign", null)');
+    let n = h.mounted.at(-1).node;
+    const complexPrompt = "    if (ok) {\r\n      // Длинная кириллическая строка без потери пробелов 🚀\r\n    }\r\n";
+    for (const [id, v] of Object.entries({ "#task-project": "Demo", "#task-title": "Whitespace test", "#assign-agent": "Carbon", "#assign-device_id": "fixture-pc", "#assign-session_id": "s-utf8-1", "#assign-role": "executor" })) {
+      n.querySelector(id).value = v;
+    }
+    n.querySelector("#task-prompt").value = complexPrompt;
+    n.querySelector("#task-prompt").oninput();
+    assert.match(n.querySelector("#task-prompt-stats").textContent, /UTF-8:/);
+
+    // Close without saving -> reopen -> draft must be restored
+    h.run('taskMutationDialog("assign", null)');
+    n = h.mounted.at(-1).node;
+    assert.equal(n.querySelector("#task-prompt").value, complexPrompt);
+    assert.equal(n.querySelector("#task-draft-row").classList.contains("hidden"), false);
+
+    // UTF-8 envelope overflow (< 20,000 chars, > 58,000 UTF-8 bytes via 3-byte chars)
+    const heavy3Byte = "\u25fc".repeat(19500);
+    n.querySelector("#task-prompt").value = heavy3Byte;
+    n.querySelector("#task-prompt").oninput();
+    for (const [id, v] of Object.entries({ "#task-project": "Demo", "#task-title": "Overflow test", "#assign-agent": "Carbon", "#assign-device_id": "fixture-pc", "#assign-session_id": "s-utf8-2", "#assign-role": "executor" })) {
+      n.querySelector(id).value = v;
+    }
+    await submit(h);
+    assert.equal(Object.keys(desk.state.tasks).length, 0);
+    assert.match(n.querySelector("#task-error").textContent, /58 000 Б/);
+    assert.equal(n.querySelector("#task-prompt").value, heavy3Byte);
+
+    // Reset draft and submit exact complexPrompt -> verify byte-for-byte preservation + manual fallback
+    n.querySelector("#task-draft-reset").onclick();
+    n.querySelector("#task-prompt").value = complexPrompt;
+    n.querySelector("#task-prompt").oninput();
+    await submit(h);
+    const savedTask = Object.values(desk.state.tasks)[0];
+    assert.equal(savedTask.prompt, complexPrompt);
+    const savedTodo = desk.state.todos[0];
+    savedTodo.forward_text = buildForwardText(savedTodo);
+    assert.ok(savedTodo.forward_text.includes(complexPrompt));
+
+    // Manual clipboard fallback when clipboard API is blocked
+    h.ctx.__todo = savedTodo;
+    h.run('copyText = async () => false;');
+    const ok = await h.run('copyPromptText(__todo.forward_text, null, "Carbon")');
+    assert.equal(ok, false);
+    assert.equal(h.mounted.at(-1).node.querySelector("#manual-copy").value, savedTodo.forward_text);
+  });
+
+  test("CP3 UI: universal search (UUIDs, aliases, device, state) and selection preservation across sync/handoff", () => {
+    const state = fixture();
+    state.config.aliases = { Demo: { "карбон": "Carbon" }, "*": {} };
+    const now = new Date().toISOString();
+    const msg1 = "aaaaaaaa-0000-4000-8000-000000000001";
+    const msg2 = "bbbbbbbb-0000-4000-8000-000000000002";
+    state.tasks[0].assignment = { agent: "Carbon", device_id: "fixture-laptop", session_id: "s-1", epoch: 2, role: "executor", adapter: "manual" };
+    state.tasks[0].assignment_message_id = msg1;
+    state.todos = [{
+      id: 30, display_id: "AD-30", message_id: msg1, task_id: taskId, project_id: projectId,
+      project: "Demo", agent: "Владелец", to: "Carbon", kind: "forward", purpose: "assignment",
+      assignment_epoch: 2, recipient_device_id: "fixture-laptop", task: "Синхронизация",
+      message: "Проверить индексы журнала", created: now,
+    }];
+    const h = harness(state);
+    for (const q of [taskId, msg1, projectId, "карбон", "fixture-laptop", "Ноутбук (тест)", "сдана на проверку", "индексы журнала"]) {
+      h.ctx.__q = q;
+      h.run('project = "Other"; todoSearch = __q; renderTodos(); taskSearch = __q; renderTasks();');
+      assert.match(h.root.querySelector("#todo-table tbody").innerHTML, /data-todo="30"/, `todo search failed for ${q}`);
+      if (q !== msg1) assert.match(h.root.querySelector("#task-list").innerHTML, new RegExp(taskId), `task search failed for ${q}`);
+    }
+
+    // Select AD-30 in active filter, then simulate synced handoff superseding msg1 -> msg2
+    h.run('project = "*"; todoSearch = ""; todoFilter = "action"; selected = selectTodoRef(data.todos[0]); render()');
+    assert.equal(h.run("selected.id"), 30);
+    state.todos[0].superseded_by = msg2;
+    state.todos[0].done_at = now;
+    state.todos.push({
+      id: 31, display_id: "AD-31", message_id: msg2, supersedes: msg1, task_id: taskId, project_id: projectId,
+      project: "Demo", agent: "Владелец", to: "Carbon", kind: "forward", purpose: "assignment",
+      assignment_epoch: 3, recipient_device_id: "fixture-pc", task: "Синхронизация",
+      message: "Новый актуальный промпт", created: now,
+    });
+    h.run("render()");
+    assert.equal(h.run("selected.id"), 31);
+    assert.equal(h.run("selected.message_id"), msg2);
+  });
+
+  test("CP3 UI: quiet hours, project mute, disconnected phone status and structured diagnostics/rejection dialog", async () => {
+    const { buildHistoricalSnapshot216 } = require("../core/test/fixtures/synthetic-program.js");
+    const { diagnoseMarker } = require("../core/marker-schema.js");
+    const state = fixture();
+    const seenIso = new Date(Date.now() - 180000).toISOString();
+    state.phone_status = { connected: false, waiting_pollers: 0, last_seen_at: seenIso };
+    state.config.quiet_hours = { enabled: true, start: "23:00", end: "07:30" };
+    state.config.notify_projects = { Demo: true };
+    state.pipeline = { pending: 2, queued: 4, rejected: 9, applied: 120, acked: 18 };
+    const samples = buildHistoricalSnapshot216("fixture-pc").invalidMarkerSamples;
+    state.rejected = samples.map((m, idx) => {
+      const d = diagnoseMarker(m.raw, "Demo");
+      const first = d.errors[0] || { code: "DEVICE_MISMATCH", field: "device_id", expected: ["fixture-pc"], hint: "Используйте актуальное устройство", retryable: true };
+      return { file: m.name, project: "Demo", seq: d.seq ?? (idx + 1), code: first.code, field: first.field, expected: first.expected, hint: first.hint, retryable: first.retryable, time: seenIso };
+    });
+
+    const calls = [];
+    const h = harness(state);
+    h.ctx.__api = async (url, body) => {
+      calls.push({ url, body });
+      if (url === "/api/diagnostics") return { redacted: true, pipeline: state.pipeline, rejected_by_field: { waiting_for: 6, state: 2, device_id: 1 } };
+      return { ok: true };
+    };
+    h.run('api = __api; copyText = async (t) => { globalThis.__diagCopied = t; return true; }; render()');
+    assert.match(h.root.querySelector("#sb-counts").textContent, /тихие часы/);
+    assert.match(h.root.querySelector("#sb-counts").textContent, /телефон отключён/);
+    assert.match(h.root.querySelector("#sb-counts").textContent, /отказов: 9/);
+
+    h.run('ACTIONS["notify-settings"]()');
+    const qhDialog = h.mounted.at(-1);
+    assert.match(qhDialog.html, /телефон отключён/);
+    qhDialog.node.querySelector("#notify-proj-0").checked = false;
+    await qhDialog.node.querySelector("#notify-settings-form").onsubmit({ preventDefault() {} });
+    assert.equal(calls[0].url, "/api/config");
+    assert.equal(calls[0].body.quiet_hours.enabled, true);
+    assert.equal(calls[0].body.notify_projects.Demo, false);
+
+    h.run("ACTIONS.diagnostics()");
+    const diag = h.mounted.at(-1);
+    for (const chip of ["Не обработано: <b>2</b>", "В очереди: <b>4</b>", "Отклонено: <b>9</b>", "Применено: <b>120</b>", "ACK: <b>18</b>"]) {
+      assert.ok(diag.html.includes(chip), `missing chip ${chip}`);
+    }
+    assert.match(diag.html, /waiting_for/);
+    assert.match(diag.html, /временно/);
+    assert.match(diag.html, /постоянно/);
+    assert.match(diag.html, /agentdesk validate/);
+    await diag.node.querySelector("#diag-export").onclick();
+    const exported = JSON.parse(h.run("__diagCopied"));
+    assert.equal(exported.redacted, true);
+    assert.equal(exported.rejected_by_field.waiting_for, 6);
   });
 }

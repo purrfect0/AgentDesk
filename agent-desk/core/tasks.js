@@ -31,11 +31,12 @@ const clone = (value) => structuredClone(value);
 const now = () => new Date().toISOString();
 const object = (v) => v && typeof v === "object" && !Array.isArray(v);
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
-function text(v, field, max = 500, required = false) {
+function text(v, field, max = 500, required = false, raw = false) {
   if (v === undefined || v === null) { if (required) fail(400, `${field} is required`); return ""; }
   if (typeof v !== "string" || v.length > max || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(v)) fail(400, `${field} must be a bounded string`);
-  const out = v.trim();
-  if (required && !out) fail(400, `${field} is required`);
+  const trimmed = v.trim();
+  if (required && !trimmed) fail(400, `${field} is required`);
+  const out = raw ? (trimmed ? v : "") : trimmed;
   if (SECRET.test(out)) fail(400, `${field} contains credential-like data; remove it`);
   return out;
 }
@@ -381,6 +382,31 @@ class TaskService {
     return ["working", "rework", "blocked"].includes(task.state);
   }
 
+  _artifactAvailability(task, item) {
+    const remoteAssignee = task.assignment?.device_id && task.assignment.device_id !== this.desk.config.device_id;
+    const repoPath = task.checkpoint?.repo;
+    if (!repoPath) return remoteAssignee ? "other_device" : "unverified";
+    let approvedRepo;
+    try {
+      approvedRepo = this._approved(repoPath, this._roots("repo", task));
+    } catch {
+      return remoteAssignee ? "other_device" : "unapproved_root";
+    }
+    try {
+      const target = path.resolve(approvedRepo, item.path);
+      if (!contained(approvedRepo, target)) return "unapproved_root";
+      if (!fs.existsSync(target)) return "missing_on_device";
+      const stat = fs.lstatSync(target);
+      if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 8 * 1024 * 1024) return "missing_on_device";
+      if (!item.sha256) return "available_unpinned";
+      const data = fs.readFileSync(target);
+      const actual = crypto.createHash("sha256").update(data).digest("hex");
+      return actual === item.sha256.toLowerCase() ? "available_verified" : "hash_mismatch";
+    } catch {
+      return "missing_on_device";
+    }
+  }
+
   enrich(task) {
     if (!task) return task;
     const copy = clone(task);
@@ -389,6 +415,9 @@ class TaskService {
     copy.origin_kind = this.originKind(copy);
     copy.lifecycle_signs = this.lifecycleSigns(copy);
     copy.active_work = this.isActiveWork(copy);
+    if (Array.isArray(copy.artifacts) && copy.artifacts.length) {
+      copy.artifacts = copy.artifacts.map((a) => ({ ...a, local_availability: this._artifactAvailability(copy, a) }));
+    }
     return copy;
   }
 
@@ -422,7 +451,7 @@ class TaskService {
       || candidate.role !== cur.role
       || candidate.adapter !== cur.adapter) return false;
     if (body.prompt !== undefined || body.message !== undefined) {
-      const wantedPrompt = text(body.prompt ?? body.message, "prompt", 20000, false);
+      const wantedPrompt = text(body.prompt ?? body.message, "prompt", 20000, false, true);
       if (wantedPrompt !== (task.prompt || "")) return false;
     }
     if (body.checkpoint !== undefined && canonicalJson(checkpoint(body.checkpoint)) !== canonicalJson(task.checkpoint || {})) return false;
@@ -500,7 +529,7 @@ class TaskService {
     task.managed_assignment = true;
     task.launch = { status: "needs_manual_launch", adapter: assignment.adapter, reason: "No launch adapter is implemented; copy context into the target session manually." };
     if (body.prompt !== undefined || body.message !== undefined) {
-      const prompt = text(body.prompt ?? body.message, "prompt", 20000, false);
+      const prompt = text(body.prompt ?? body.message, "prompt", 20000, false, true);
       if (prompt) task.prompt = prompt;
       else delete task.prompt;
     }
@@ -571,7 +600,7 @@ class TaskService {
     task.managed_assignment = true;
     task.launch = { status: "needs_manual_launch", adapter: assignment.adapter, reason: "No launch adapter is implemented; copy context into the target session manually." };
     if (body.prompt !== undefined || body.message !== undefined) {
-      const prompt = text(body.prompt ?? body.message, "prompt", 20000, false);
+      const prompt = text(body.prompt ?? body.message, "prompt", 20000, false, true);
       if (prompt) task.prompt = prompt;
       else delete task.prompt;
     }

@@ -49,7 +49,7 @@ body.native .status-bar { padding-right: 16px; }
   display: flex; flex-direction: column;
 }
 .main-window > .window-body {
-  flex: 1; min-height: 0;
+  flex: 1; min-height: 0; overflow: hidden;
   display: flex; flex-direction: column;
   margin: 6px 6px 4px;
 }
@@ -179,6 +179,20 @@ b.to { font-weight: bold; }
 .dialog:has(.vol-panel) { width: 320px; }
 .todo-panel { height: 208px; }
 .queue-toolbar { margin-bottom: 6px; }
+.owner-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 0 0 6px; }
+.owner-actions .sub { margin-right: 4px; }
+.pipeline-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 8px; }
+.pipeline-chip { background: #fff; border: 1px solid #808080; padding: 2px 6px; white-space: nowrap; }
+.pipeline-chip b { color: navy; }
+.pipeline-chip.bad b { color: #a00000; }
+.diag-panel { max-height: 220px; margin: 6px 0; }
+.diag-table th, .diag-table td { vertical-align: top; white-space: normal; overflow-wrap: anywhere; padding: 3px 6px; border-bottom: 1px solid #dfdfdf; }
+.artifact-badge { display: inline-block; padding: 0 4px; border: 1px solid #808080; background: #f4f4f4; }
+.artifact-badge.ok { color: #006000; border-color: #006000; }
+.artifact-badge.bad { color: #a00000; border-color: #a00000; }
+.draft-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin: 3px 0; }
+.quiet-grid { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0; }
+.quiet-grid input[type=time] { width: auto; }
 #copy-status { margin: 4px 0; min-height: 1em; }
 #todo-search-hint { margin: 4px 0; }
 #todo-table { table-layout: fixed; }
@@ -329,6 +343,7 @@ button:focus-visible, [role=tab]:focus-visible, summary:focus-visible { outline:
 body.mobile [data-action="mail-roots"] { display: none !important; }
 @media (max-width: 520px) {
   .assignment-grid { grid-template-columns: 1fr; }
+  #todo-table th { white-space: normal; overflow-wrap: anywhere; vertical-align: bottom; }
   #todo-table th:nth-child(3) { width: 90px; }
   #todo-table th:last-child { width: 80px; }
   #todo-table th:first-child, #todo-table td:first-child { display: none; }
@@ -348,7 +363,10 @@ body.mobile [data-action="mail-roots"] { display: none !important; }
   .toolbar { overflow-x: auto; }
   button.tool { min-width: 40px; }
   button.tool span { display: none; }
-  .todo-panel { height: auto; max-height: 40vh; }
+  .project-window > .window-body { overflow-y: auto; }
+  .todo-panel { height: auto; max-height: 28vh; }
+  .tab-window { flex: 1 0 220px; }
+  .status-bar { flex-wrap: wrap; }
   td.task { max-width: 160px; }
   table, .menubar, .status-bar-field, .dialog { font-size: 13px; }
   #todo-table td:nth-child(2), #agent-table td.state { white-space: normal; }

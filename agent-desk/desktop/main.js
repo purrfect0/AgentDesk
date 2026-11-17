@@ -52,7 +52,7 @@ async function boot() {
   }
   boundLan = desk.lanEnabled;
   desk.on("alert", (a) => {
-    if (!desk.config.notify) return; // PC popups are off; the phone still gets the alert (GET /api/alerts)
+    if (!desk.config.notify || a.suppressed) return; // PC popups are off or muted by quiet hours / project filter; phone gets non-suppressed alerts
     try { showPopup(a); } catch (e) { desk.log("popup failed:", e.message); }
     if (win && !win.isDestroyed() && !win.isFocused()) win.flashFrame(true); // the taskbar button blinks
   });
@@ -176,7 +176,12 @@ function rebuildTrayMenu() {
 function updateTray() {
   if (!tray) return;
   const open = desk.state.todos.filter((t) => !t.done_at && !t.superseded_by && !t.quiet && !["receipt", "ack", "delivery"].includes(t.kind) && !(t.kind === "forward" && (t.forwarded_at || t.acked_at || (t.delivery_target && t.delivery_target !== desk.config.device_id)))).length;
-  tray.setToolTip(open ? `${TITLE} — нужно сделать: ${open}` : `${TITLE} — всё под контролем`);
+  const submitted = Object.values(desk.state.tasks || {}).filter((t) => t.state === "submitted").length;
+  const quiet = desk._inQuietHours() ? " · тихие часы" : "";
+  const parts = [];
+  if (open) parts.push(`нужно сделать: ${open}`);
+  if (submitted) parts.push(`на проверке: ${submitted}`);
+  tray.setToolTip(`${TITLE} — ${parts.length ? parts.join(" · ") : "всё под контролем"}${quiet}`);
 }
 
 function setConfig(patch) {
@@ -194,6 +199,7 @@ function applyAutostart() {
 async function onConfig() {
   applyAutostart();
   rebuildTrayMenu();
+  updateTray();
   if (desk.lanEnabled !== boundLan) {
     // Wi-Fi access on/off: listen again on the same port (127.0.0.1 only, or the whole network).
     try {
