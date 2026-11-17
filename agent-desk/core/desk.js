@@ -1361,10 +1361,25 @@ class Desk extends EventEmitter {
     return copy;
   }
 
+  _redactLocalPaths(txt) {
+    let out = String(txt || "");
+    const roots = [
+      this.dataDir,
+      ...(this.config.watch || []).map((w) => w?.path),
+      ...(this.config.task_repo_roots || []).map((r) => (typeof r === "string" ? r : r?.path)),
+      ...(this.config.task_skill_roots || []).map((r) => (typeof r === "string" ? r : r?.path)),
+      ...(this.config.mail_roots || []).map((r) => r?.path),
+    ].filter((p) => typeof p === "string" && p.length > 1).sort((a, b) => b.length - a.length);
+    for (const r of roots) out = out.split(r).join("<локальный путь ПК>");
+    out = out.replace(/[A-Za-z]:[\\/][^\s"'`)\]]+/g, "<локальный путь ПК>");
+    out = out.replace(/(^|[\s("'`\[])\/(?:tmp|var|home|Users|root|opt|etc|mnt|srv|run|private)\/[^\s"'`)\]]+/g, "$1<локальный путь ПК>");
+    return out;
+  }
+
   _scopedContext(id, auth = { local: true }) {
     const res = this.tasks.context(this._resolveTaskId(id));
     if (auth?.local) return res;
-    const scrub = (txt) => String(txt || "").replace(/[A-Za-z]:\\[^\s"'`)\]]+/g, "<локальный путь ПК>");
+    const scrub = (txt) => this._redactLocalPaths(txt);
     const checks = structuredClone(res.checks || {});
     if (Array.isArray(checks.skills)) {
       checks.skills = checks.skills.map((s) => ({
@@ -1457,7 +1472,7 @@ class Desk extends EventEmitter {
     const c = this.config;
     const projects = new Set([...Object.values(s.agents).map((a) => a.project), ...c.watch.map((w) => w.project).filter(Boolean)]);
     const linkPayload = this.peers.payload(auth);
-    const scrubWarn = (txt) => (localOwner ? txt : String(txt || "").replace(/[A-Za-z]:\\[^\s)]+/g, "<локальная папка ПК>"));
+    const scrubWarn = (txt) => (localOwner ? txt : this._redactLocalPaths(txt));
     return {
       version: s.version,
       scope: localOwner ? "loopback_owner" : "lan_phone",

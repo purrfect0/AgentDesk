@@ -83,18 +83,41 @@ describe("CP5 — Candidate 2.3.4 Version Parity, Mobile Web/Font Pipeline & And
   });
 
   it("prepares mobile/www cleanly and validates Android Win98 SFNT font conversion & manifest permissions", () => {
-    execFileSync(process.execPath, [path.join(AGENT_DESK_ROOT, "scripts", "prepare-mobile.js")], {
-      cwd: AGENT_DESK_ROOT,
-      stdio: "pipe",
-    });
-    const www = path.join(AGENT_DESK_ROOT, "mobile", "www");
-    assert.ok(fs.existsSync(path.join(www, "index.html")));
-    assert.ok(fs.existsSync(path.join(www, "app.js")));
-    assert.ok(fs.existsSync(path.join(www, "app.css")));
-    assert.ok(fs.existsSync(path.join(www, "fonts", "ad-cyrillic.woff")));
-    assert.equal(fs.existsSync(path.join(www, "popup.html")), false);
-    assert.equal(fs.existsSync(path.join(www, "popup.js")), false);
-    assert.equal(fs.existsSync(path.join(www, "linked-ui.test.js")), false);
+    const createdStubs = [];
+    const createdDirs = [];
+    const ensureAssetStub = (relDir, fileName, content) => {
+      const dir = path.join(AGENT_DESK_ROOT, "web", relDir);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+        createdDirs.push(dir);
+      }
+      const full = path.join(dir, fileName);
+      if (!fs.existsSync(full)) {
+        fs.writeFileSync(full, content);
+        createdStubs.push(full);
+      }
+    };
+    ensureAssetStub("vendor", "98.css", "/* stub 98.css for clean checkout CI */");
+    ensureAssetStub("icons", "world-0.png", Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    try {
+      execFileSync(process.execPath, [path.join(AGENT_DESK_ROOT, "scripts", "prepare-mobile.js")], {
+        cwd: AGENT_DESK_ROOT,
+        stdio: "pipe",
+      });
+      const www = path.join(AGENT_DESK_ROOT, "mobile", "www");
+      assert.ok(fs.existsSync(path.join(www, "index.html")));
+      assert.ok(fs.existsSync(path.join(www, "app.js")));
+      assert.ok(fs.existsSync(path.join(www, "app.css")));
+      assert.ok(fs.existsSync(path.join(www, "fonts", "ad-cyrillic.woff")));
+      assert.equal(fs.existsSync(path.join(www, "popup.html")), false);
+      assert.equal(fs.existsSync(path.join(www, "popup.js")), false);
+      assert.equal(fs.existsSync(path.join(www, "linked-ui.test.js")), false);
+    } finally {
+      for (const f of createdStubs) fs.rmSync(f, { force: true });
+      for (const d of createdDirs.reverse()) {
+        try { if (fs.readdirSync(d).length === 0) fs.rmdirSync(d); } catch {}
+      }
+    }
 
     const fonts = [
       "fonts/ad-cyrillic.woff",
