@@ -201,7 +201,7 @@ function parseMarker(text, folderProject, now = Date.now()) {
     throw new Error(`waiting_for должен быть одним из: ${[...WAITING_FOR].join(", ")}`);
   }
   for (const field of ["task_id", "project_id"]) if (ev[field] && !UUID.test(ev[field])) throw new Error(`${field} должен быть UUID`);
-  if (ev.execution_state && !["assigned", "working", "submitted", "accepted", "rework", "blocked"].includes(ev.execution_state)) throw new Error("неверное execution_state");
+  if (ev.execution_state && !["assigned", "working", "submitted", "accepted", "rework", "blocked", "cancelled", "archived"].includes(ev.execution_state)) throw new Error("неверное execution_state");
   return ev;
 }
 
@@ -230,7 +230,9 @@ function forwardText(t) {
   if (t.kind !== "forward") return t.message;
   const head = `[Agent Desk] от: ${t.agent} → ${t.to} · проект: ${t.project}${t.task ? ` · задача: ${t.task}` : ""}`;
   const update = t.supersedes ? `\n(обновлённая версия, заменяет ${t.supersedes})` : "";
-  const assignment = t.purpose === "assignment" ? `\n[Agent Desk] task_id: ${t.task_id}; assignment_epoch: ${t.assignment_epoch}; session_id: ${t.recipient_session_id}; device_id: ${t.recipient_device_id}. Сохраняй эти поля в отчётах по заданию.` : "";
+  const assignment = t.purpose === "assignment"
+    ? `\n[Agent Desk] project_id: ${t.project_id}; task_id: ${t.task_id}; assignment_epoch: ${t.assignment_epoch}; session_id: ${t.recipient_session_id}; device_id: ${t.recipient_device_id}. Сохраняй эти поля в отчётах по заданию.`
+    : (t.project_id && t.task_id ? `\n[Agent Desk] project_id: ${t.project_id}; task_id: ${t.task_id}.` : "");
   return `${head}${update}\n\n${t.message}${assignment}\n\n[Agent Desk] message_id: ${t.message_id}. `
     + `Начав работу по этому сообщению, укажи в маркере "ack": "${t.message_id}".`;
 }
@@ -621,18 +623,18 @@ class Desk extends EventEmitter {
     return "";
   }
 
-  _acknowledge(ev) {
+  _acknowledge(ev, explicitTaskId = ev.task_id) {
     let count = 0;
     for (const t of this.state.todos) {
       if (t.kind !== "forward" || t.acked_at || t.project !== ev.project || !this._sameAgent(t.to, ev.agent)) continue;
       if (this._ackError(t, ev)) continue;
-      if (ev.task_id && t.task_id && ev.task_id !== t.task_id) continue;
+      if (explicitTaskId && t.task_id && explicitTaskId !== t.task_id) continue;
       // Legacy display IDs are accepted only for unambiguous messages created on this desk.
+      // Same title never implicitly ACKs or links tasks: only an explicit ack moves acked_at.
       const localLegacy = t.origin_device_id === this.config.device_id && !t.from_device
         && ev.ack.includes(String(t.legacy_message_id || t.display_id || "").toUpperCase());
       const explicit = ev.ack.includes(String(t.message_id).toUpperCase()) || localLegacy;
-      const implicit = !ev.ack.length && ev.state === "working" && t.forwarded_at && !t.done_at && ev.task && ev.task === t.task;
-      if (!explicit && !implicit) continue;
+      if (!explicit) continue;
       t.acked_at = ev.received; t.acked_by = ev.agent; t.forwarded_at ||= ev.received;
       this._close(t, ev.received, true); count++;
     }
@@ -679,12 +681,13 @@ class Desk extends EventEmitter {
       stored.stale = true; // an older marker cannot acknowledge a newer assignment
       return;
     }
-    this._acknowledge(ev);
-    ev.device_id = this.config.device_id;
+    const explicitTaskId = ev.task_id;
+    ev.device_id ||= this.config.device_id;
     ev.project_id ||= this._projectIdentity(ev.project, ev.task_id);
     const receiptOnly = ev.state === "idle" && ev.ack.length && !ev.execution_state && !ev.checkpoint && !ev.artifacts && !ev.task && !ev.to && !ev.message;
     const task = receiptOnly ? null : this.tasks?.observe(ev);
     if (task?.task_id) ev.task_id = task.task_id;
+    this._acknowledge(ev, explicitTaskId);
     for (const k of ["state", "waiting_for", "phase", "task", "to", "from", "note", "result", "session", "seq"]) agent[k] = ev[k];
     agent.device_id = this.config.device_id;
     agent.task_id = ev.task_id;
@@ -747,8 +750,17 @@ class Desk extends EventEmitter {
     const s = this.state;
     const closed = s.todos.filter((t) => t.done_at);
     if (closed.length <= LIMITS.closed) return;
-    const keep = new Set(closed.sort((a, b) => ts(b.done_at) - ts(a.done_at)).slice(0, LIMITS.closed));
-    s.todos = s.todos.filter((t) => !t.done_at || keep.has(t));
+    const pinned = new Set();
+    for (const task of Object.values(s.tasks || {})) {
+      if (task && task.state !== "archived" && task.assignment_message_id) pinned.add(task.assignment_message_id);
+    }
+    for (const open of s.todos) {
+      if (!open.done_at && open.supersedes) pinned.add(open.supersedes);
+    }
+    const trimmable = closed.filter((t) => !pinned.has(t.message_id));
+    if (trimmable.length <= LIMITS.closed) return;
+    const keep = new Set(trimmable.sort((a, b) => ts(b.done_at) - ts(a.done_at)).slice(0, LIMITS.closed));
+    s.todos = s.todos.filter((t) => !t.done_at || pinned.has(t.message_id) || keep.has(t));
   }
 
   _reject(file, folder, project, error) {
@@ -932,7 +944,7 @@ class Desk extends EventEmitter {
       app: { name: "Agent Desk", version: VERSION, protocol: PROTOCOL },
       agents: { ...s.agents, ...Object.fromEntries(Object.entries(s.remote_agents || {}).map(([k, a]) => [`remote:${k}`, a])) },
       device_id: c.device_id,
-      tasks: this.tasks.list().map(t => ({ ...t, card_id: s.task_card_ids[t.task_id] })), bindings: Object.values(s.bindings || {}),
+      tasks: this.tasks.list().map(t => this.tasks.enrich(t)), bindings: Object.values(s.bindings || {}),
       mail: this.mailPayload(),
       todos: s.todos.map((t) => ({ ...t, forward_text: forwardText(t) })),
       events: s.events.slice(-LIMITS.payloadEvents).map(({ message, ...e }) => e),
@@ -1203,7 +1215,7 @@ class Desk extends EventEmitter {
     try {
       if (req.method === "GET") {
         const project = url.searchParams.get("project") || "", agent = url.searchParams.get("agent") || "", session_id = url.searchParams.get("session_id") || "";
-        const tasks = this.tasks.list({ project, agent, session_id, ...(route === "inbox" ? { device_id: this.config.device_id } : {}) });
+        const tasks = this.tasks.list({ project, agent, session_id, ...(route === "inbox" ? { device_id: this.config.device_id } : {}) }).map(t => this.tasks.enrich(t));
         if (route === "inbox") return this._send(res, 200, {
           device_id: this.config.device_id, tasks,
           todos: this.state.todos.filter(t => !t.acked_at && !t.done_at && !t.superseded_by && (!project || t.project === project) && (!agent || this._sameAgent(t.to, agent))
@@ -1216,15 +1228,15 @@ class Desk extends EventEmitter {
         if (route === "read") {
           const rawId = clean(url.searchParams.get("id"), 128);
           const resolved = this._resolveTaskId(rawId);
-          const taskByCard = resolved !== rawId ? this.state.tasks?.[resolved] : null;
-          const todo = this.state.todos.find(t => t.message_id === rawId || String(t.display_id || "").toUpperCase() === rawId.toUpperCase())
-            || (taskByCard?.assignment_message_id && this.state.todos.find(t => t.message_id === taskByCard.assignment_message_id))
-            || (taskByCard && this.state.todos.find(t => t.task_id === taskByCard.task_id));
-          const task = this.state.tasks?.[resolved] || (todo && this.state.tasks?.[todo.task_id]);
-          const card = task ? this.state.task_card_ids?.[task.task_id] : undefined;
+          const resolvedKey = typeof resolved === "string" ? resolved.toLowerCase() : resolved;
+          const taskObj = this.state.tasks?.[resolvedKey] || this.state.tasks?.[resolved] || null;
+          const todo = this.state.todos.find(t => t.message_id === rawId.toLowerCase() || t.message_id === rawId || String(t.display_id || "").toUpperCase() === rawId.toUpperCase())
+            || (taskObj?.assignment_message_id && this.state.todos.find(t => t.message_id === taskObj.assignment_message_id))
+            || (taskObj && (this.state.todos.findLast(t => t.task_id === taskObj.task_id && !t.superseded_by) || this.state.todos.findLast(t => t.task_id === taskObj.task_id)));
+          const task = taskObj || (todo && this.state.tasks?.[todo.task_id]);
           return this._send(res, todo || task ? 200 : 404, todo || task ? {
             todo: todo && { ...todo, forward_text: forwardText(todo) },
-            task: task && (card ? { ...task, card_id: card } : task),
+            task: task && this.tasks.enrich(task),
           } : { error: "сообщение/задача не найдены" }, cors);
         }
         return this._send(res, 404, { error: "not found" }, cors);
@@ -1234,7 +1246,7 @@ class Desk extends EventEmitter {
       const body = await readJsonBody(req, LIMITS.body);
       if (route.startsWith("task/")) {
         const action = route.slice(5);
-        if (!["assign", "transition", "handoff"].includes(action)) return this._send(res, 404, { error: "not found" }, cors);
+        if (!["assign", "transition", "handoff", "coordinate"].includes(action)) return this._send(res, 404, { error: "not found" }, cors);
         if (action === "assign" && !body.task_id && !body.id && body.project && !body.project_id) body.project_id = this._projectIdentity(body.project);
         return this._send(res, 200, this.tasks[action](body), cors);
       }
@@ -1249,7 +1261,8 @@ class Desk extends EventEmitter {
           if (t.project !== ev.project || !this._sameAgent(t.to, ev.agent)) throw Object.assign(new Error("ACK не соответствует проекту/адресату"), { status: 403 });
           const ackError = this._ackError(t, ev);
           if (ackError) throw Object.assign(new Error(ackError), { status: 409 });
-          if (!t.acked_at && !this._acknowledge(ev)) throw Object.assign(new Error("ACK не соответствует назначению"), { status: 409 });
+          if (t.acked_at) return this._send(res, 200, { ok: true, message_id: t.message_id, acked_at: t.acked_at, duplicate: true }, cors);
+          if (!this._acknowledge(ev)) throw Object.assign(new Error("ACK не соответствует назначению"), { status: 409 });
           this._saveState(); this.emit("change");
           return this._send(res, 200, { ok: true, message_id: t.message_id, acked_at: t.acked_at }, cors);
         }
@@ -1270,7 +1283,7 @@ class Desk extends EventEmitter {
   _post(pathname, body, auth) {
     if (pathname.startsWith("/api/tasks/")) {
       const action = pathname.slice("/api/tasks/".length);
-      if (!["assign", "transition", "handoff"].includes(action)) return { code: 404, body: { error: "not found" } };
+      if (!["assign", "transition", "handoff", "coordinate"].includes(action)) return { code: 404, body: { error: "not found" } };
       if (action === "assign" && !body.task_id && !body.id && body.project && !body.project_id) body.project_id = this._projectIdentity(body.project);
       try { return { body: this.tasks[action](body) }; }
       catch (e) { return { code: e.status || 400, body: { error: e.message } }; }

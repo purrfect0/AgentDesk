@@ -27,7 +27,7 @@ const TODO_ICON = { forward: "envelope_closed-1", reply: "msg_question-2", block
 const stateLabel = (a) => (a.state === "waiting" && WAIT_LABEL[a.waiting_for]) || STATE_LABEL[a.state] || a.state;
 // Forwarded-but-unconfirmed reminders stay visible but no longer need the owner.
 // Delivery/ACK receipts are quiet telemetry, never owner actions or task acceptance.
-const needsAction = (t) => !t.done_at && !t.quiet && !["receipt", "ack", "delivery"].includes(t.kind) && !(t.kind === "forward" && (t.forwarded_at || t.acked_at || (t.delivery_target && data?.device_id && t.delivery_target !== data.device_id)));
+const needsAction = (t) => !t.done_at && !t.superseded_by && !t.quiet && !["receipt", "ack", "delivery"].includes(t.kind) && !(t.kind === "forward" && (t.forwarded_at || t.acked_at || (t.delivery_target && data?.device_id && t.delivery_target !== data.device_id)));
 const isForwardPending = (t) => t && !t.done_at && t.kind === "forward";
 const isLocal = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
 // Accent animations: --ph keeps the blink phase tied to the clock (12 s fits the 1 s and 2.4 s
@@ -349,6 +349,16 @@ function cardAge(created) {
   const hours = Math.floor(minutes / 60);
   return hours < 24 ? `${hours} ч${minutes % 60 ? ` ${minutes % 60} мин` : ""}` : `${Math.floor(hours / 24)} д${hours % 24 ? ` ${hours % 24} ч` : ""}`;
 }
+function todoRowTitle(t) {
+  if (t.task) return t.task;
+  if (t.kind === "reply") return `${t.agent} ждёт вашего ответа`;
+  if (t.kind === "limit") return `${t.agent}: закончился лимит модели`;
+  if (t.kind === "blocked") return `${t.agent} заблокирован`;
+  if (t.kind === "forward") {
+    return t.purpose === "assignment" ? `Назначение для ${t.to}` : `Переслать ${t.to} от ${t.agent}`;
+  }
+  return "Сообщение";
+}
 function renderTodos() {
   const todos = data.todos.filter(todoMatches)
     .sort((a, b) => (needsAction(b) - needsAction(a)) || (!!a.done_at - !!b.done_at) || b.created.localeCompare(a.created));
@@ -380,7 +390,7 @@ function renderTodos() {
     const card = t.purpose === "assignment" && task ? taskCardNumber(task) : t.display_id || `AD-${t.id}`;
     return `<tr class="${cls}" tabindex="0" data-key="t:${t.id}" data-todo="${t.id}" aria-haspopup="menu" aria-controls="todo-context-menu" aria-expanded="${todoMenuId === t.id}"${act ? ` data-since="${esc(t.created)}" style="${accent(t.created)}"` : ""}>
       <td class="c-ico"><img src="${icon(ico)}" alt=""></td>
-      <td><code class="card-id">${esc(card)}</code><b>${esc(t.task || "Сообщение")}</b><br><span class="sub">${esc(t.project)} · ${t.purpose === "assignment" ? `Назначение №${esc(t.assignment_epoch)}` : esc(t.agent)}${t.to ? ` → ${esc(t.to)}` : ""}</span>${peerNote(t)}</td>
+      <td><code class="card-id">${esc(card)}</code><b>${esc(todoRowTitle(t))}</b><br><span class="sub">${esc(t.project)} · ${t.purpose === "assignment" ? `Назначение №${esc(t.assignment_epoch)}` : esc(t.agent)}${t.to ? ` → ${esc(t.to)}` : ""}</span>${peerNote(t)}</td>
       <td class="status">${todoStatus(t)}</td>
       <td class="todo-age"><time datetime="${esc(t.created)}" title="${esc(new Date(t.created).toLocaleString("ru-RU"))}">${esc(cardAge(t.created))}</time></td></tr>`;
   }).join(""));
@@ -443,8 +453,8 @@ async function copySelectedTodo(e) {
 
 // --- linked tasks and project files ----------------------------------------------
 // Preserve the established 98.css windows, inset panels, controls and quiet typography.
-const TASK_LABEL = { assigned: "назначена", working: "в работе", submitted: "сдана на проверку", accepted: "принята", rework: "на доработке", blocked: "заблокирована" };
-const TASK_NEXT = { assigned: ["working", "submitted", "blocked"], working: ["submitted", "blocked"], submitted: ["accepted", "rework", "blocked"], accepted: [], rework: ["working", "submitted", "blocked"], blocked: ["assigned", "working", "submitted", "rework"] };
+const TASK_LABEL = { assigned: "назначена", working: "в работе", submitted: "сдана на проверку", accepted: "принята", rework: "на доработке", blocked: "заблокирована", cancelled: "отменена", archived: "в архиве" };
+const TASK_NEXT = { assigned: ["working", "submitted", "blocked", "cancelled", "archived"], working: ["submitted", "blocked", "cancelled"], submitted: ["accepted", "rework", "blocked", "cancelled"], accepted: ["archived"], rework: ["working", "submitted", "blocked", "cancelled"], blocked: ["assigned", "working", "submitted", "rework", "cancelled", "archived"], cancelled: ["archived"], archived: [] };
 const listValues = (value) => Array.isArray(value) ? value : Object.values(value || {});
 function taskList() {
   // Replication can briefly include duplicate snapshots; identity is never the display title.
@@ -498,14 +508,30 @@ async function copyTaskPrompt(t, button) {
     return copyPromptText(context.text, button, t.assignment?.agent);
   } catch (error) { alertBox("Копирование задания", error.message, "msg_warning-2"); }
 }
+function taskOriginKind(t) {
+  if (t.origin_kind) return t.origin_kind;
+  if (t.managed_assignment) return "managed";
+  return t.assignment?.role === "legacy" ? "migrated" : "observed";
+}
+function isTaskActiveUi(t) {
+  if (typeof t.active_work === "boolean") return t.active_work;
+  if (["accepted", "cancelled", "archived", "submitted"].includes(t.state)) return false;
+  const origin = taskOriginKind(t);
+  if (origin === "managed" || t.managed_assignment === undefined) return ["assigned", "working", "rework", "blocked"].includes(t.state);
+  const hasOpen = taskReceiptRows(t).some(r => !r.done_at && !r.superseded_by);
+  if (origin === "migrated") return t.state === "blocked" && hasOpen;
+  return t.state === "assigned" ? hasOpen : ["working", "rework", "blocked"].includes(t.state);
+}
 function taskMatches(t) {
   const q = taskSearch.trim();
   const messages = taskReceiptRows(t);
-  if (q && !matchesSearch(q, [taskCardNumber(t), t.title, t.task, t.project, t.assignment?.agent, t.prompt, ...messages.flatMap(r => [r.display_id, r.message])])) return false;
-  if (taskFilter === "active") return ["assigned", "working", "rework", "blocked"].includes(t.state);
+  if (q && !matchesSearch(q, [taskCardNumber(t), t.task_id, t.project_id, t.title, t.task, t.project, t.assignment?.agent, t.assignment?.device_id, deviceLabel(t.assignment?.device_id), t.state, TASK_LABEL[t.state], t.status_reason, t.prompt, ...messages.flatMap(r => [r.display_id, r.message_id, r.message])])) return false;
+  if (taskFilter === "active") return isTaskActiveUi(t);
   if (taskFilter === "submitted") return t.state === "submitted";
   if (taskFilter === "blocked") return ["blocked", "rework"].includes(t.state);
   if (taskFilter === "accepted") return t.state === "accepted";
+  if (taskFilter === "cancelled") return ["cancelled", "archived"].includes(t.state);
+  if (taskFilter === "legacy") return taskOriginKind(t) !== "managed" && !isTaskActiveUi(t);
   return true;
 }
 function renderTasks() {
@@ -546,11 +572,16 @@ function taskDetails(t) {
   const cp = t.checkpoint || {};
   const kv = (k, v) => v === undefined || v === null || v === "" ? "" : `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`;
   const kvList = (k, items) => Array.isArray(items) && items.length ? `<dt>${esc(k)}</dt><dd><ul class="kv-list">${items.map(s => `<li>${esc(typeof s === "string" ? s : (s?.name ? `${s.name} (${s.path})` : s?.path || JSON.stringify(s)))}</li>`).join("")}</ul></dd>` : "";
+  const originLabel = { managed: "явное назначение", observed: "наблюдаемый маркер", migrated: "исторический импорт" }[taskOriginKind(t)] || "";
   const cpRows = [kv("Репозиторий", cp.repo), kv("Ветка", cp.branch), kv("Коммит", cp.commit), kv("Отчёт", cp.report), kv("Следующий шаг", cp.next_step), kvList("Ограничения", cp.constraints), kvList("Выбранные skills", cp.skills), kvList("Манифест", cp.manifest)].join("");
+  const promptBlock = t.prompt ? '<h3>Промпт задания</h3><div id="task-prompt-body" class="msg-body"></div>' : "";
   const history = (t.history || []).slice(-12).reverse();
-  dialog("Задача — подробности", `<h2 class="task-title"><code>${esc(taskCardNumber(t))}</code> — ${esc(t.title || t.task)}</h2><dl class="kv">${kv("Карточка", taskCardNumber(t))}${kv("Состояние", TASK_LABEL[t.state] || t.state)}${kv("Исполнитель", t.assignment?.agent)}${kv("Компьютер", deviceLabel(t.assignment?.device_id))}${kv("Сессия", sessionLabel(t))}${kv("Ведущий", deviceLabel(t.coordinator_device_id))}${cpRows}</dl>
-    ${technicalDetails(t)}<h3>Артефакты</h3>${listValues(t.artifacts).length ? `<ul class="receipt-list">${listValues(t.artifacts).map((a) => `<li><code>${esc(a.path)}</code> · ${esc(a.status || "не проверен")}<br><code class="sub" title="${esc(a.hash || a.sha256 || "")}">SHA-256: ${esc((a.hash || a.sha256 || "не указан").slice(0, 16))}${(a.hash || a.sha256) ? "…" : ""}</code></li>`).join("")}</ul>` : "<p>Артефактов пока нет.</p>"}
-    <h3>История задачи</h3><ul class="receipt-list">${history.map((h) => `<li>${esc(h.time ? `${hhmm(h.time)} · ${ago(h.time)}` : (h.at || ""))} · ${esc(TASK_LABEL[h.state] || h.action || h.state || "событие")}${h.actor?.agent ? ` · ${esc(h.actor.agent)}` : h.agent ? ` · ${esc(h.agent)}` : ""}${h.note ? ` · ${esc(h.note)}` : ""}</li>`).join("") || "<li>Истории пока нет.</li>"}</ul><div class="buttons"><button data-close>Закрыть</button></div>`, null, { wide: true });
+  dialog("Задача — подробности", `<h2 class="task-title"><code>${esc(taskCardNumber(t))}</code> — ${esc(t.title || t.task)}</h2><dl class="kv">${kv("Карточка", taskCardNumber(t))}${kv("Состояние", TASK_LABEL[t.state] || t.state)}${kv("Источник", originLabel)}${kv("Причина статуса", t.status_reason)}${kv("Исполнитель", t.assignment?.agent)}${kv("Компьютер", deviceLabel(t.assignment?.device_id))}${kv("Сессия", sessionLabel(t))}${kv("Ведущий", deviceLabel(t.coordinator_device_id))}${cpRows}</dl>
+    ${technicalDetails(t)}${promptBlock}<h3>Артефакты</h3>${listValues(t.artifacts).length ? `<ul class="receipt-list">${listValues(t.artifacts).map((a) => `<li><code>${esc(a.path)}</code> · ${esc(a.status || "не проверен")}<br><code class="sub" title="${esc(a.hash || a.sha256 || "")}">SHA-256: ${esc((a.hash || a.sha256 || "не указан").slice(0, 16))}${(a.hash || a.sha256) ? "…" : ""}</code></li>`).join("")}</ul>` : "<p>Артефактов пока нет.</p>"}
+    <h3>История задачи</h3><ul class="receipt-list">${history.map((h) => `<li>${esc(h.time ? `${hhmm(h.time)} · ${ago(h.time)}` : (h.at || ""))} · ${esc(TASK_LABEL[h.state] || h.action || h.state || "событие")}${h.actor?.agent ? ` · ${esc(h.actor.agent)}` : h.agent ? ` · ${esc(h.agent)}` : ""}${h.note ? ` · ${esc(h.note)}` : ""}</li>`).join("") || "<li>Истории пока нет.</li>"}</ul><div class="buttons"><button data-close>Закрыть</button></div>`, (node) => {
+    const pb = node.querySelector("#task-prompt-body");
+    if (pb) pb.textContent = t.prompt;
+  }, { wide: true });
 }
 function checksMarkup(checks) {
   if (!checks || (typeof checks === "object" && !Object.keys(checks).length)) return "Проверки не предоставлены сервером — состояние репозитория не подтверждено.";
@@ -678,7 +709,7 @@ function taskMutationDialog(mode, t) {
         if (creating) body.title = node.querySelector("#task-title").value.trim();
         const prompt = node.querySelector("#task-prompt").value.trim();
         if (prompt.length > 20000) { err.textContent = `В промпте ${prompt.length.toLocaleString("ru-RU")} символов, максимум 20 000. Текст сохранён в форме: сократите его или вынесите материалы в файл.`; node.querySelector("#task-prompt").focus(); return; }
-        if (prompt) body.prompt = prompt;
+        if (prompt || !creating) body.prompt = prompt;
         if (mode === "handoff") body.checkpoint = { ...t.checkpoint, ...Object.fromEntries(["repo", "branch", "commit", "report"].map((k) => [k, node.querySelector(`#checkpoint-${k}`).value.trim()])), next_step: node.querySelector("#handoff-next").value.trim(), constraints: node.querySelector("#handoff-constraints").value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) };
       }
       save.disabled = true; err.textContent = "Сохраняю…";
@@ -1439,19 +1470,33 @@ const ACTIONS = {
     const kv = (k, v) => (v ? `<dt>${k}</dt><dd>${esc(v)}</dd>` : "");
     const when = (iso) => iso && `${hhmm(iso)} · ${ago(iso)}`;
     const isTodo = selected.type === "todo";
+    const linkedTask = isTodo && item.task_id ? currentTask(item.task_id) : null;
+    const taskCard = linkedTask ? taskCardNumber(linkedTask) : "";
+    const cardLabel = item.display_id || `AD-${item.id}`;
     const head = isTodo
       ? `${kv("Задача", item.task)}${kv("Кому переслать", item.to)}${kv("Заметка", item.note)}${kv("Результат", item.result)}
-         ${kv("Карточка", item.display_id || `AD-${item.id}`)}${kv("Доставлено", when(item.delivered_at))}${kv("Переслано", when(item.forwarded_at))}${kv("Получено агентом", when(item.acked_at))}
+         ${kv("Карточка", cardLabel)}${taskCard && taskCard !== cardLabel ? kv("Карточка задачи", taskCard) : ""}${item.superseded_by ? kv("Версия сообщения", "заменено новым сообщением — копируйте актуальную карточку") : ""}${kv("Доставлено", when(item.delivered_at))}${kv("Переслано", when(item.forwarded_at))}${kv("Получено агентом", when(item.acked_at))}
          ${kv("Пришло с компьютера", fromDeviceLabel(item))}${kv("Отправлено на", item.sent_to && `«${item.sent_to.name}», ${when(item.sent_to.at)}${item.sent_to.auto ? " (само)" : ""}`)}${kv("Не отправилось", !item.done_at && item.send_error)}`
       : `${kv("Состояние", stateLabel(item))}${kv("Этап", item.phase)}${kv("Задача", item.task)}${kv("Кому переслать", item.to)}
          ${kv("Заметка", item.note)}${kv("Результат", item.result)}${kv("Устройство", deviceLabel(item.device_id || data.device_id))}${kv("Сессия", sessionLabel(item))}${kv("Обновлено", when(item.updated))}`;
-    const msgBlock = isTodo && item.message ? `<h3>Сообщение</h3><div class="msg-body"></div><p class="sub">«Копировать» добавляет заголовок Agent Desk и message_id для квитанции агента.</p>` : "";
+    const msgBlock = isTodo && item.message ? `<h3>Сообщение</h3><div class="msg-body"></div><p class="sub">${item.superseded_by ? "Это сообщение заменено новым: его копирование отключено, чтобы не отправить устаревший текст." : "«Копировать» добавляет заголовок Agent Desk и message_id для квитанции агента."}</p>` : "";
     const historyBlock = history.length ? `<h3>Последние события</h3><div class="sunken-panel" style="max-height:160px"><table><thead><tr><th>Время</th><th>Событие</th><th>Задача</th></tr></thead><tbody>
       ${history.map((e) => `<tr><td class="nowrap">${hhmm(e.time)}</td><td class="nowrap">${esc(stateLabel(e))}${e.to ? ` → ${esc(e.to)}` : ""}</td><td>${esc(e.task)}</td></tr>`).join("")}
       </tbody></table></div>` : "";
-    dialog(`${isTodo ? `${item.display_id || `AD-${item.id}`} — ` : ""}${item.agent} — ${item.project}`, `<dl class="kv">${head}</dl>${technicalDetails(item)}${msgBlock}${historyBlock}
-      <div class="buttons">${isTodo && item.message ? `<button data-action="copy-message">Копировать</button>` : ""}<button data-close>OK</button></div>`,
+    const todoBtns = [];
+    if (isTodo && item.message) todoBtns.push(`<button data-action="copy-message" data-todo-id="${item.id}"${item.superseded_by ? " disabled" : ""}>Копировать</button>`);
+    if (isTodo && !item.done_at && !item.superseded_by && item.kind === "forward" && !item.forwarded_at && !item.acked_at) todoBtns.push(`<button data-action="mark-forwarded" data-todo-id="${item.id}"${online ? "" : " disabled"}>Переслал</button>`);
+    if (isTodo && !item.done_at) todoBtns.push(`<button data-action="done-selected" data-todo-id="${item.id}"${online ? "" : " disabled"}>Закрыть</button>`);
+    if (isTodo && item.done_at && !item.superseded_by) todoBtns.push(`<button data-action="reopen-todo" data-todo-id="${item.id}"${online ? "" : " disabled"}>Вернуть в очередь</button>`);
+    dialog(`${isTodo ? `${cardLabel} — ` : ""}${item.agent} — ${item.project}`, `<dl class="kv">${head}</dl>${technicalDetails(item)}${msgBlock}${historyBlock}
+      <div class="buttons">${todoBtns.join("")}<button data-close>OK</button></div>`,
     (node) => { const mb = node.querySelector(".msg-body"); if (mb) mb.textContent = item.message; }, { wide: true });
+  },
+  "reopen-todo"(e) {
+    const button = e?.target?.closest("button");
+    const id = button?.dataset.todoId ? Number(button.dataset.todoId) : selected?.type === "todo" ? selected.id : null;
+    const todo = data.todos.find(t => t.id === id);
+    if (online && todo && !todo.superseded_by) { closeDialog(); act(`/api/todo/${id}/undo`, {}); }
   },
   async "copy-message"(e) {
     const button = e?.target?.closest("button");
@@ -1692,6 +1737,33 @@ $("#todo-search")?.addEventListener("input", (e) => { todoSearch = e.target.valu
 $("#task-filter")?.addEventListener("change", (e) => { taskFilter = e.target.value; taskRenderLimit = 60; renderTasks(); });
 $("#task-search")?.addEventListener("input", (e) => { taskSearch = e.target.value; taskRenderLimit = 60; renderTasks(); });
 
+// Called by the desktop app when "Открыть" is pressed in a popup, and by a tap on a phone notification.
+window.abFocus = (proj, todoId) => {
+  if (proj) {
+    project = proj;
+    localStorage.setItem("ad.project", project);
+  }
+  if (Number.isInteger(todoId)) {
+    selected = { type: "todo", id: todoId };
+    const target = data?.todos?.find((t) => t.id === todoId);
+    if (todoSearch) {
+      todoSearch = "";
+      const sInp = $("#todo-search");
+      if (sInp) sInp.value = "";
+    }
+    if (target && !todoMatches(target)) {
+      todoFilter = "all";
+      const fSel = $("#todo-filter");
+      if (fSel) fSel.value = "all";
+    }
+  }
+  render();
+  document.querySelector(`tr[data-todo="${todoId}"]`)?.scrollIntoView?.({ block: "nearest" });
+};
+
+// Called by the desktop app for a popup about another computer (a pairing request, a new pair).
+window.abPeers = () => { if (data && !document.querySelector("#peers-live")) ACTIONS.peers(); };
+
 // --- desktop app window (Electron: desktop/preload.js gives window.agentDesk) -----
 
 const desk = AD_HOST.desktop;
@@ -1785,20 +1857,6 @@ $("#resize-grip").addEventListener("pointerdown", (e) => {
     apply(0);
   });
 })();
-
-// Called by the desktop app when "Открыть" is pressed in a popup, and by a tap on a phone notification.
-window.abFocus = (proj, todoId) => {
-  if (proj) {
-    project = proj;
-    localStorage.setItem("ad.project", project);
-  }
-  if (Number.isInteger(todoId)) selected = { type: "todo", id: todoId };
-  render();
-  document.querySelector(`tr[data-todo="${todoId}"]`)?.scrollIntoView({ block: "nearest" });
-};
-
-// Called by the desktop app for a popup about another computer (a pairing request, a new pair).
-window.abPeers = () => { if (data && !document.querySelector("#peers-live")) ACTIONS.peers(); };
 
 AD_HOST.onNotificationTap((proj, todoId) => window.abFocus(proj, todoId));
 document.addEventListener("visibilitychange", () => {

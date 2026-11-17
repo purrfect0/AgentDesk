@@ -19,9 +19,9 @@ const HELP = {
 };
 const GLOBALS = new Set(["home", "server", "file", "json", "timeout"]);
 const FIELDS = new Set([
-  "id", "project", "project_id", "agent", "session_id", "message_id", "task_id", "event_id", "seq",
-  "state", "execution_state", "assignment_epoch", "epoch", "previous_session_id", "previous_device_id", "device_id", "origin_device_id", "delivery_target", "role", "adapter",
-  "title", "task", "prompt", "to", "from", "phase", "waiting_for", "note", "result", "message", "ref", "needs_forward", "ack",
+  "id", "request_id", "project", "project_id", "agent", "session_id", "message_id", "task_id", "event_id", "seq",
+  "state", "execution_state", "assignment_epoch", "epoch", "previous_session_id", "previous_device_id", "device_id", "coordinator_device_id", "target_device_id", "origin_device_id", "delivery_target", "role", "adapter",
+  "title", "task", "prompt", "to", "from", "phase", "waiting_for", "note", "reason", "result", "message", "ref", "needs_forward", "ack",
   "checkpoint", "artifacts", "assignment", "binding", "repo", "branch", "commit", "report", "manifest", "next_step", "constraints", "skills",
 ]);
 const JSON_FIELDS = new Set(["checkpoint", "artifacts", "assignment", "binding", "manifest", "constraints", "skills"]);

@@ -1,2 +1,7 @@
-# Generated font CSS must match the generator on Windows and Linux.
-agent-desk/web/fonts/fonts.css text eol=lf
+* text=auto
+*.css text eol=lf
+*.woff binary
+*.woff2 binary
+*.png binary
+*.ico binary
+*.wav binary

@@ -443,4 +443,27 @@ if (process.argv.includes("--serve")) {
     const h = harness(); let copied; h.ctx.__copy = async (text) => { copied = text; return true; }; h.run('copyText = __copy; contextDialog(data.tasks[0], { text: "SERVER VERIFIED", checks: { warning: "<img onerror=x>" } })'); const dialog = h.mounted.at(-1); assert.match(dialog.html, /&lt;img/); await dialog.node.querySelector("#copy-context").onclick(); assert.equal(copied, "SERVER VERIFIED");
     const prompt = h.run('agentPrompt({ project: "Demo", path: "C:\\\\Synthetic\\\\inbox" })'); assert.match(prompt, /message_id — глобальный UUID/); assert.match(prompt, /ACK не означает/); assert.match(prompt, /task_id — UUID/);
   });
+  test("CP1 UI: 207 migrated legacy cards stay out of active filter while remaining searchable, and cancelled/archived show status reason", () => {
+    const { buildHistoricalSnapshot216 } = require("../core/test/fixtures/synthetic-program.js");
+    const snap = buildHistoricalSnapshot216("fixture-pc");
+    const state = fixture();
+    state.tasks = Object.values(snap.state.tasks).map((t) => ({ ...t, card_id: snap.state.task_card_ids[t.task_id] }));
+    state.todos = snap.state.todos;
+    const h = harness(state);
+    h.run('project = "*"; taskFilter = "active"; renderTasks()');
+    const activeHtml = h.root.querySelector("#task-list").innerHTML;
+    assert.equal((activeHtml.match(/<article/g) || []).length, 6);
+    assert.doesNotMatch(activeHtml, /Историческое напоминание #1\b/);
+    h.run('taskFilter = "legacy"; renderTasks()');
+    assert.match(h.root.querySelector("#task-count").textContent, /207 из 216/);
+    h.run('taskFilter = "all"; taskSearch = "AT-150"; renderTasks()');
+    assert.match(h.root.querySelector("#task-list").innerHTML, /AT-150/);
+    state.tasks.at(-1).state = "cancelled";
+    state.tasks.at(-1).status_reason = "Тестовая причина отмены";
+    h.run('taskSearch = ""; taskFilter = "cancelled"; renderTasks()');
+    assert.match(h.root.querySelector("#task-list").innerHTML, /отменена/);
+    h.ctx.__lastTask = state.tasks.at(-1);
+    h.run('taskDetails(__lastTask)');
+    assert.match(h.mounted.at(-1).html, /Тестовая причина отмены/);
+  });
 }

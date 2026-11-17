@@ -7,12 +7,24 @@ const { spawnSync } = require("node:child_process");
 const { stableId } = require("./sync.js");
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const STATES = new Set(["assigned", "working", "submitted", "accepted", "rework", "blocked"]);
+const STATES = new Set(["assigned", "working", "submitted", "accepted", "rework", "blocked", "cancelled", "archived"]);
+const COORDINATOR_STATES = new Set(["accepted", "rework", "cancelled", "archived"]);
 const NEXT = {
-  assigned: ["working", "submitted", "blocked"], working: ["submitted", "blocked"],
-  submitted: ["accepted", "rework", "blocked"], accepted: [],
-  rework: ["working", "submitted", "blocked"], blocked: ["assigned", "working", "submitted", "rework"],
+  assigned: ["working", "submitted", "blocked", "cancelled", "archived"],
+  working: ["submitted", "blocked", "cancelled"],
+  submitted: ["accepted", "rework", "blocked", "cancelled"],
+  accepted: ["archived"],
+  rework: ["working", "submitted", "blocked", "cancelled"],
+  blocked: ["assigned", "working", "submitted", "rework", "cancelled", "archived"],
+  cancelled: ["archived"],
+  archived: [],
 };
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(",")}}`;
+  return JSON.stringify(value ?? null);
+}
+const payloadDigest = (value) => crypto.createHash("sha256").update(canonicalJson(value)).digest("hex");
 const SECRET = /(?:-----BEGIN [^-]*PRIVATE KEY-----|\bBearer\s+\S+|\b(?:gh[pousr]_[\w]{16,}|github_pat_[\w]{16,}|sk-[\w-]{16,})|(?:password|passwd|secret|authorization|(?:api|agent|access|refresh)[ _-]?key|(?:(?:access|refresh)[ _-]?)?token)["']?\s*[=:]\s*["']?[^\s"']+|https?:\/\/[^\s/@]+:[^\s/@]+@)/i;
 const SECRET_PATH = /(?:^|[/\\])(?:\.git|\.env(?:\.[^/\\]+)?|node_modules|credentials?(?:\.[^/\\]+)?|secrets?(?:\.[^/\\]+)?|id_(?:rsa|ed25519)|[^/\\]*\.(?:pem|key|p12|pfx|keystore))(?:[/\\]|$)/i;
 const clone = (value) => structuredClone(value);
@@ -328,7 +340,110 @@ class TaskService {
     s.todos.push(todo);
   }
 
-  _put(task, persist, publishAssignment = false) {
+  originKind(task) {
+    if (task?.managed_assignment) return "managed";
+    return task?.assignment?.role === "legacy" ? "migrated" : "observed";
+  }
+
+  lifecycleSigns(task) {
+    const todos = Array.isArray(this.desk.state.todos) ? this.desk.state.todos : [];
+    const localDevice = this.desk.config.device_id;
+    const activeMsg = (task.assignment_message_id && todos.find((t) => t.message_id === task.assignment_message_id))
+      || todos.find((t) => t.task_id === task.task_id && !t.superseded_by && t.purpose === "assignment")
+      || null;
+    const needsForward = Boolean(
+      activeMsg
+      && !activeMsg.superseded_by
+      && !activeMsg.forwarded_at
+      && !activeMsg.acked_at
+      && !activeMsg.done_at
+      && (!activeMsg.delivery_target || activeMsg.delivery_target === localDevice)
+    );
+    return {
+      on_board: Boolean(task?.created),
+      needs_forward: needsForward,
+      forwarded: Boolean(activeMsg?.forwarded_at),
+      recipient_acked: Boolean(activeMsg?.acked_at),
+      executing: task.state === "working",
+      submitted: task.state === "submitted",
+      accepted: task.state === "accepted",
+    };
+  }
+
+  isActiveWork(task) {
+    if (!task || ["accepted", "cancelled", "archived", "submitted"].includes(task.state)) return false;
+    const origin = this.originKind(task);
+    if (origin === "managed") return ["assigned", "working", "rework", "blocked"].includes(task.state);
+    const todos = Array.isArray(this.desk.state.todos) ? this.desk.state.todos : [];
+    const hasOpenTodo = todos.some((t) => t.task_id === task.task_id && !t.done_at && !t.superseded_by);
+    if (origin === "migrated") return task.state === "blocked" && hasOpenTodo;
+    if (task.state === "assigned") return hasOpenTodo;
+    return ["working", "rework", "blocked"].includes(task.state);
+  }
+
+  enrich(task) {
+    if (!task) return task;
+    const copy = clone(task);
+    const card = this.desk.state.task_card_ids?.[copy.task_id];
+    if (card) copy.card_id = card;
+    copy.origin_kind = this.originKind(copy);
+    copy.lifecycle_signs = this.lifecycleSigns(copy);
+    copy.active_work = this.isActiveWork(copy);
+    return copy;
+  }
+
+  _requestSpec(kind, body) {
+    if (body.request_id === undefined || body.request_id === null || body.request_id === "") return null;
+    const id = identity(body.request_id, "request_id", true);
+    const { request_id: _ignored, ...rest } = body;
+    return { id, kind, hash: payloadDigest({ kind, body: rest }) };
+  }
+
+  _replayRequest(spec) {
+    if (!spec) return null;
+    const entry = this.desk.state.task_requests?.[spec.id];
+    if (!entry) return null;
+    if (entry.hash !== spec.hash) fail(409, "request_id was already used with different parameters");
+    const existing = this.desk.state.tasks?.[entry.task_id];
+    return existing ? clone(existing) : null;
+  }
+
+  _isExactEpochRetry(kind, body, task) {
+    const supplied = body.assignment_epoch ?? body.epoch;
+    if (!Number.isSafeInteger(supplied) || supplied !== task.assignment.epoch - 1 || task.state !== "assigned") return false;
+    const last = task.history?.at(-1);
+    if (!last || last.kind !== kind || last.assignment_epoch !== task.assignment.epoch) return false;
+    const fallback = kind === "handoff" ? last.previous_assignment || task.assignment : { device_id: task.coordinator_device_id };
+    const candidate = this._assignment({ ...body, project: body.project ?? task.project }, fallback);
+    const cur = task.assignment;
+    if (!this._same(candidate.agent, cur.agent, task.project)
+      || candidate.device_id !== cur.device_id
+      || candidate.session_id !== cur.session_id
+      || candidate.role !== cur.role
+      || candidate.adapter !== cur.adapter) return false;
+    if (body.prompt !== undefined || body.message !== undefined) {
+      const wantedPrompt = text(body.prompt ?? body.message, "prompt", 20000, false);
+      if (wantedPrompt !== (task.prompt || "")) return false;
+    }
+    if (body.checkpoint !== undefined && canonicalJson(checkpoint(body.checkpoint)) !== canonicalJson(task.checkpoint || {})) return false;
+    if (body.artifacts !== undefined && canonicalJson(artifacts(body.artifacts)) !== canonicalJson(task.artifacts || [])) return false;
+    return true;
+  }
+
+  _retireOpenAssignmentTodos(task, reasonState) {
+    const todos = this.desk.state.todos;
+    if (!Array.isArray(todos)) return;
+    const time = task.updated || now();
+    for (const row of todos) {
+      if (row.task_id === task.task_id && row.purpose === "assignment" && !row.done_at) {
+        row.done_at = time;
+        row.closed_reason = reasonState;
+        row.updated = time;
+      }
+    }
+  }
+
+  _put(task, persist, publishAssignment = false, reqSpec = null) {
     const state = this.desk.state;
     const before = persist ? clone(state) : null;
     const dirtyBefore = this.desk.dirty;
@@ -341,8 +456,14 @@ class TaskService {
     if (Buffer.byteLength(JSON.stringify(envelope), "utf8") > 60000) fail(400, "Task exceeds the 60,000-byte sync event budget; shorten checkpoint/artifacts/history text");
     try {
       if (publishAssignment) this._assignmentMessage(task);
+      if (["cancelled", "archived"].includes(task.state)) this._retireOpenAssignmentTodos(task, task.state);
       state.tasks = { ...state.tasks, [task.task_id]: task };
       state.bindings = { ...state.bindings, [binding.id]: binding };
+      if (reqSpec) {
+        const prevMap = object(state.task_requests) ? state.task_requests : {};
+        const entries = [...Object.entries(prevMap).filter(([k]) => k !== reqSpec.id), [reqSpec.id, { hash: reqSpec.hash, task_id: task.task_id, time: task.updated }]].slice(-500);
+        state.task_requests = Object.fromEntries(entries);
+      }
       if (persist) this.desk._saveState();
     } catch (error) {
       if (persist) { this.desk.state = before; this.desk.dirty = dirtyBefore; }
@@ -354,10 +475,17 @@ class TaskService {
 
   assign(body) {
     if (!object(body)) fail(400, "body must be an object");
+    const reqSpec = this._requestSpec("assign", body);
+    const replayed = this._replayRequest(reqSpec);
+    if (replayed) return replayed;
     const id = body.task_id ?? body.id;
     let task = id !== undefined ? this.get(id) : null;
     const coordinator = this._coordinator(task);
-    if (task) { this._project(body, task); this._expected(body, task); }
+    if (task) {
+      this._project(body, task);
+      if (this._isExactEpochRetry("assign", body, task)) return clone(task);
+      this._expected(body, task);
+    }
     const assignment = this._assignment({ ...body, project: body.project ?? task?.project }, { device_id: coordinator });
     const prior = task?.assignment;
     if (prior) {
@@ -368,6 +496,7 @@ class TaskService {
     const old = task.state;
     task.assignment = assignment;
     task.state = "assigned";
+    delete task.status_reason;
     task.managed_assignment = true;
     task.launch = { status: "needs_manual_launch", adapter: assignment.adapter, reason: "No launch adapter is implemented; copy context into the target session manually." };
     if (body.prompt !== undefined || body.message !== undefined) {
@@ -377,41 +506,58 @@ class TaskService {
     }
     metadata(body, task);
     this._history(task, "assign", body, old, prior);
-    return this._put(task, true, true);
+    return this._put(task, true, true, reqSpec);
   }
 
   _state(body, task, observed = false) {
     const state = text(body.execution_state ?? body.state, "execution_state", 20, true);
     if (!STATES.has(state)) fail(400, `execution_state must be one of ${[...STATES].join(", ")}`);
     if (state !== task.state && !NEXT[task.state]?.includes(state)) fail(409, `Cannot transition from ${task.state} to ${state}`);
-    if (["accepted", "rework"].includes(state) && this.desk.config.device_id !== task.coordinator_device_id) fail(403, "Acceptance/rework requires the coordinator device");
-    // Observed review decisions must originate on the coordinator device too.
-    if (observed && ["accepted", "rework"].includes(state) && body.device_id !== task.coordinator_device_id) fail(403, "Acceptance/rework markers must come from the coordinator device");
+    if (COORDINATOR_STATES.has(state) && this.desk.config.device_id !== task.coordinator_device_id) fail(403, "Acceptance/rework/cancel/archive requires the coordinator device");
+    // Observed review/cancel/archive decisions must originate on the coordinator device too.
+    if (observed && COORDINATOR_STATES.has(state) && body.device_id !== task.coordinator_device_id) fail(403, "Review/cancel/archive markers must come from the coordinator device");
     return state;
   }
 
   transition(body) {
     if (!object(body)) fail(400, "body must be an object");
+    const reqSpec = this._requestSpec("transition", body);
+    const replayed = this._replayRequest(reqSpec);
+    if (replayed) return replayed;
     const task = this.get(body.task_id ?? body.id);
-    const review = ["accepted", "rework"].includes(body.execution_state ?? body.state);
+    const requestedState = body.execution_state ?? body.state;
+    const coordAction = COORDINATOR_STATES.has(requestedState);
+    const cancelOrArchive = ["cancelled", "archived"].includes(requestedState);
     let actor;
-    if (review && body.actor) actor = this._reviewer(body, task);
-    else {
-      this._reporter(body, task);
-      if (review) actor = { agent: "owner", device_id: this.desk.config.device_id, session_id: "", role: "owner" };
+    if (coordAction && body.actor) actor = this._reviewer(body, task);
+    else if (cancelOrArchive && !task.managed_assignment && !body.agent && !body.session_id) {
+      this._project(body, task);
+      if (this.desk.config.device_id !== task.coordinator_device_id) fail(403, "Cancel/archive requires the coordinator device");
+      if (body.assignment_epoch !== undefined || body.epoch !== undefined) this._expected(body, task);
+      actor = { agent: "owner", device_id: this.desk.config.device_id, session_id: "", role: "owner" };
+    } else {
+      this._reporter(body, task, !task.managed_assignment);
+      if (coordAction) actor = { agent: "owner", device_id: this.desk.config.device_id, session_id: "", role: "owner" };
     }
+    const reasonText = text(body.reason ?? body.note, "reason", 1000, requestedState === "cancelled");
     const old = task.state;
     task.state = this._state(body, task);
+    if (task.state === "cancelled") task.status_reason = reasonText;
+    else if (task.state === "archived") task.status_reason = reasonText || task.status_reason || "Перенесено в архив владельцем";
     metadata(body, task);
-    this._history(task, "transition", body, old, undefined, actor);
-    return this._put(task, true);
+    this._history(task, "transition", { ...body, note: body.note ?? reasonText }, old, undefined, actor);
+    return this._put(task, true, false, reqSpec);
   }
 
   handoff(body) {
     if (!object(body)) fail(400, "body must be an object");
+    const reqSpec = this._requestSpec("handoff", body);
+    const replayed = this._replayRequest(reqSpec);
+    if (replayed) return replayed;
     const task = this.get(body.task_id ?? body.id);
     this._coordinator(task);
     this._project(body, task);
+    if (this._isExactEpochRetry("handoff", body, task)) return clone(task);
     this._expected(body, task);
     const prior = clone(task.assignment);
     const assignment = this._assignment({ ...body, project: task.project }, prior);
@@ -421,6 +567,7 @@ class TaskService {
     const old = task.state;
     task.assignment = assignment;
     task.state = "assigned";
+    delete task.status_reason;
     task.managed_assignment = true;
     task.launch = { status: "needs_manual_launch", adapter: assignment.adapter, reason: "No launch adapter is implemented; copy context into the target session manually." };
     if (body.prompt !== undefined || body.message !== undefined) {
@@ -430,7 +577,33 @@ class TaskService {
     }
     metadata(body, task);
     this._history(task, "handoff", body, old, prior);
-    return this._put(task, true, true);
+    return this._put(task, true, true, reqSpec);
+  }
+
+  coordinate(body) {
+    if (!object(body)) fail(400, "body must be an object");
+    const reqSpec = this._requestSpec("coordinate", body);
+    const replayed = this._replayRequest(reqSpec);
+    if (replayed) return replayed;
+    const task = this.get(body.task_id ?? body.id);
+    const local = identity(this.desk.config.device_id, "local device_id");
+    const target = identity(body.coordinator_device_id ?? body.target_device_id, "coordinator_device_id");
+    if (task.coordinator_device_id === target && task.previous_coordinator_device_id === local) {
+      this._expected(body, task);
+      return clone(task);
+    }
+    this._coordinator(task);
+    this._project(body, task);
+    this._expected(body, task);
+    if (target === local) return clone(task);
+    const nextCoordEpoch = (task.coordinator_epoch || 1) + 1;
+    if (!Number.isSafeInteger(nextCoordEpoch)) fail(409, "Coordinator epoch exhausted");
+    task.previous_coordinator_device_id = local;
+    task.coordinator_device_id = target;
+    task.coordinator_epoch = nextCoordEpoch;
+    const actor = { agent: "owner", device_id: local, session_id: "", role: "coordinator" };
+    this._history(task, "coordinate", { note: body.note || `Координация передана на устройство ${target}` }, task.state, undefined, actor);
+    return this._put(task, true, false, reqSpec);
   }
 
   /** Caller supplies already validated/canonicalized markers and owns their save/archive transaction. */
@@ -446,12 +619,12 @@ class TaskService {
       const id = uuid(ev.task_id, "task_id");
       task = this.desk.state.tasks[id] ? this.get(id) : null;
     } else {
-      const matches = Object.values(this.desk.state.tasks).filter((t) => t.project === project && t.title === title && this._same(t.assignment.agent, agent, project)
+      const matches = Object.values(this.desk.state.tasks).filter((t) => !["cancelled", "archived"].includes(t.state) && t.project === project && t.title === title && this._same(t.assignment.agent, agent, project)
         && (t.managed_assignment || ((!ev.device_id || t.assignment.device_id === ev.device_id) && (!t.assignment.session_id || !ev.session || t.assignment.session_id === ev.session))));
       task = matches.length === 1 ? clone(matches[0]) : null;
     }
     const legacy = !ev.task_id && !task?.managed_assignment;
-    const review = ["accepted", "rework"].includes(ev.execution_state);
+    const review = COORDINATOR_STATES.has(ev.execution_state);
     let actor;
     if (!task) {
       const local = this._coordinator();
@@ -469,7 +642,12 @@ class TaskService {
     }
     const old = task.state;
     const inferred = ev.execution_state || ({ working: "working", done: "submitted", blocked: "blocked" })[ev.state];
-    if (inferred) task.state = this._state({ execution_state: inferred, device_id: actor?.device_id ?? task.assignment.device_id }, task, true);
+    if (inferred) {
+      const reasonText = text(ev.note, "reason", 1000, inferred === "cancelled");
+      task.state = this._state({ execution_state: inferred, device_id: actor?.device_id ?? task.assignment.device_id }, task, true);
+      if (task.state === "cancelled") task.status_reason = reasonText;
+      else if (task.state === "archived") task.status_reason = reasonText || task.status_reason || "Перенесено в архив";
+    }
     metadata(ev, task);
     this._history(task, "observe", ev, old, undefined, actor);
     const result = this._put(task, false);

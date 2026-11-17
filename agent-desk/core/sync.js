@@ -115,7 +115,10 @@ class SyncJournal {
     if (priorEntity && !ev.deleted && (priorEntity.project !== ev.data.project || (priorEntity.project_id && ev.data.project_id && priorEntity.project_id !== ev.data.project_id))) throw error("идентичность проекта не может измениться при синхронизации", 409);
     const sameMessage = ev.type === "todo" && !ev.deleted && priorEntity && ["message", "to", "task_id", "assignment_epoch", "recipient_session_id", "recipient_device_id"].every(field => priorEntity[field] === ev.data[field]);
     const higherReceipt = sameMessage && (ev.data.receipt_epoch || 0) > (priorEntity.receipt_epoch || 0);
-    const higherAssignment = ev.type === "task" && !ev.deleted && priorEntity && (ev.data.assignment?.epoch || 0) > (priorEntity.assignment?.epoch || 0) && ev.origin === priorEntity.coordinator_device_id;
+    const higherAssignment = ev.type === "task" && !ev.deleted && priorEntity
+      && (((ev.data.assignment?.epoch || 0) > (priorEntity.assignment?.epoch || 0))
+        || ((ev.data.coordinator_epoch || 1) > (priorEntity.coordinator_epoch || 1)))
+      && ev.origin === priorEntity.coordinator_device_id;
     if (!higherAssignment && !higherReceipt && !newer(version(ev), j.versions[key])) {
       // Concurrent delivery and ACK are independent monotonic facts, not competing status snapshots.
       if (ev.type === "todo" && !ev.deleted) {
@@ -166,13 +169,22 @@ class SyncJournal {
       const map = ev.type === "task" ? s.tasks : s.bindings;
       if (ev.type === "task" && data && map[ev.entity_id]) {
         const prior = map[ev.entity_id];
-        if (data.coordinator_device_id !== prior.coordinator_device_id) throw error("координатор задачи не может измениться при синхронизации", 409);
+        if (data.coordinator_device_id !== prior.coordinator_device_id) {
+          const oldCoordEpoch = prior.coordinator_epoch || 1;
+          const newCoordEpoch = data.coordinator_epoch || 1;
+          if (ev.origin !== prior.coordinator_device_id || newCoordEpoch <= oldCoordEpoch) {
+            throw error("координатор задачи не может измениться при синхронизации", 409);
+          }
+        }
+        const effectiveCoordinator = prior.coordinator_device_id;
         const oldEpoch = prior.assignment?.epoch || 0, newEpoch = data.assignment?.epoch || 0;
         if (newEpoch < oldEpoch) return;
-        if (newEpoch !== oldEpoch && ev.origin !== prior.coordinator_device_id) throw error("назначение меняет только координатор", 403);
+        if (newEpoch !== oldEpoch && ev.origin !== effectiveCoordinator) throw error("назначение меняет только координатор", 403);
         if (newEpoch === oldEpoch && canonical(prior.assignment) !== canonical(data.assignment)) throw error("конфликт назначений одной версии", 409);
-        if (data.state === "accepted" && prior.state !== "accepted" && ev.origin !== prior.coordinator_device_id) throw error("приёмку подтверждает только координатор", 403);
-        if (prior.state === "accepted" && data.state !== "accepted" && ev.origin !== prior.coordinator_device_id) return;
+        if (["accepted", "cancelled", "archived"].includes(data.state) && data.state !== prior.state && ev.origin !== effectiveCoordinator) {
+          throw error("приёмку, отмену и архивацию подтверждает только координатор", 403);
+        }
+        if (["accepted", "cancelled", "archived"].includes(prior.state) && data.state !== prior.state && ev.origin !== effectiveCoordinator) return;
       }
       if (!data) delete map[ev.entity_id]; else map[ev.entity_id] = data;
     }
