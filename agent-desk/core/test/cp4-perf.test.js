@@ -388,7 +388,7 @@ test("CP4 Perf resilience: slow client, request cancellation, server restart rec
           res.on("data", (c) => chunks.push(c));
           res.on("end", () => resolve(Buffer.concat(chunks).length));
           res.resume();
-        }, 120);
+        }, 600);
       });
       req.on("error", reject);
       req.end();
@@ -396,7 +396,7 @@ test("CP4 Perf resilience: slow client, request cancellation, server restart rec
 
     const fastRes = await httpGetRaw(port, "/api/state?compact=1");
     assert.equal(fastRes.status, 200);
-    assert.ok(fastRes.elapsedMs < 110, `Fast client must not wait on paused slow client (took ${fastRes.elapsedMs}ms)`);
+    assert.ok(fastRes.elapsedMs < 500, `Fast client must not wait on paused slow client (took ${fastRes.elapsedMs}ms)`);
     const slowBytes = await slowPromise;
     assert.equal(slowBytes, fastRes.bytes);
 

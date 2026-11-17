@@ -31,7 +31,13 @@ jobs:
       - name: Install locked test dependencies (without install scripts)
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Core and agent interface tests
-        run: npm test
+        run: |
+          npm test > test.log 2>&1 || {
+            grep -E "✖|AssertionError|Error" test.log | head -n 15 | while IFS= read -r l; do echo "::error::$l"; done
+            cat test.log
+            exit 1
+          }
+          cat test.log
       - name: Task and mailbox UI tests
         run: node --test web/linked-ui.test.js
       - name: Cyrillic pixel font is up to date

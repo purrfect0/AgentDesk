@@ -83,28 +83,25 @@ describe("CP5 — Candidate 2.3.4 Version Parity, Mobile Web/Font Pipeline & And
   });
 
   it("prepares mobile/www cleanly and validates Android Win98 SFNT font conversion & manifest permissions", () => {
-    const createdStubs = [];
-    const createdDirs = [];
-    const ensureAssetStub = (relDir, fileName, content) => {
-      const dir = path.join(AGENT_DESK_ROOT, "web", relDir);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-        createdDirs.push(dir);
-      }
-      const full = path.join(dir, fileName);
-      if (!fs.existsSync(full)) {
-        fs.writeFileSync(full, content);
-        createdStubs.push(full);
-      }
-    };
-    ensureAssetStub("vendor", "98.css", "/* stub 98.css for clean checkout CI */");
-    ensureAssetStub("icons", "world-0.png", Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const tmpSandbox = makeTmpDir("ad-cp5-mobweb-");
     try {
-      execFileSync(process.execPath, [path.join(AGENT_DESK_ROOT, "scripts", "prepare-mobile.js")], {
-        cwd: AGENT_DESK_ROOT,
+      fs.mkdirSync(path.join(tmpSandbox, "scripts"), { recursive: true });
+      fs.mkdirSync(path.join(tmpSandbox, "mobile"), { recursive: true });
+      fs.copyFileSync(path.join(AGENT_DESK_ROOT, "scripts", "prepare-mobile.js"), path.join(tmpSandbox, "scripts", "prepare-mobile.js"));
+      fs.cpSync(path.join(AGENT_DESK_ROOT, "web"), path.join(tmpSandbox, "web"), { recursive: true });
+      fs.mkdirSync(path.join(tmpSandbox, "web", "vendor"), { recursive: true });
+      fs.mkdirSync(path.join(tmpSandbox, "web", "icons"), { recursive: true });
+      if (!fs.existsSync(path.join(tmpSandbox, "web", "vendor", "98.css"))) {
+        fs.writeFileSync(path.join(tmpSandbox, "web", "vendor", "98.css"), "/* synthetic 98.css */");
+      }
+      if (!fs.existsSync(path.join(tmpSandbox, "web", "icons", "world-0.png"))) {
+        fs.writeFileSync(path.join(tmpSandbox, "web", "icons", "world-0.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      }
+      execFileSync(process.execPath, [path.join(tmpSandbox, "scripts", "prepare-mobile.js")], {
+        cwd: tmpSandbox,
         stdio: "pipe",
       });
-      const www = path.join(AGENT_DESK_ROOT, "mobile", "www");
+      const www = path.join(tmpSandbox, "mobile", "www");
       assert.ok(fs.existsSync(path.join(www, "index.html")));
       assert.ok(fs.existsSync(path.join(www, "app.js")));
       assert.ok(fs.existsSync(path.join(www, "app.css")));
@@ -113,10 +110,7 @@ describe("CP5 — Candidate 2.3.4 Version Parity, Mobile Web/Font Pipeline & And
       assert.equal(fs.existsSync(path.join(www, "popup.js")), false);
       assert.equal(fs.existsSync(path.join(www, "linked-ui.test.js")), false);
     } finally {
-      for (const f of createdStubs) fs.rmSync(f, { force: true });
-      for (const d of createdDirs.reverse()) {
-        try { if (fs.readdirSync(d).length === 0) fs.rmdirSync(d); } catch {}
-      }
+      fs.rmSync(tmpSandbox, { recursive: true, force: true });
     }
 
     const fonts = [
