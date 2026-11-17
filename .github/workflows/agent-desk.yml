@@ -6,7 +6,7 @@ name: Agent Desk
 
 on:
   push:
-    branches: [main]
+    branches: [main, "carbon/**", "release/**"]
     tags: ["agent-desk-v*"]
     paths: ["agent-desk/**", ".github/workflows/agent-desk.yml"]
   pull_request:

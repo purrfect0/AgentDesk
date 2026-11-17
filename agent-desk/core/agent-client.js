@@ -17,6 +17,7 @@ const COMMANDS = Object.freeze({
   context: { method: "GET", route: "/api/agent/context", query: ["id"] },
   assign: { method: "POST", route: "/api/agent/task/assign" },
   transition: { method: "POST", route: "/api/agent/task/transition" },
+  coordinate: { method: "POST", route: "/api/agent/task/coordinate" },
 });
 
 class AgentClientError extends Error {

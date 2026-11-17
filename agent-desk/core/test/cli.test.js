@@ -59,7 +59,7 @@ function command(entry, args, home, input = "", extraEnv = {}) {
 const json = (result) => JSON.parse(result.stdout);
 
 // Each command is verified against the shared contract, NOT Desk's mutable state.
-test("all nine client commands use scoped agent routes and the separate key", async (t) => {
+test("all ten client commands use scoped agent routes and the separate key", async (t) => {
   const { client, calls, home } = await fixture(t);
   const before = fs.readFileSync(path.join(home, "config.json"), "utf8");
   const bodies = {
@@ -69,6 +69,7 @@ test("all nine client commands use scoped agent routes and the separate key", as
     status: {}, handoff: { task_id: "task-uuid", assignment_epoch: 4, assignment: { agent: "C", session_id: "s2" }, checkpoint: { report: "synthetic" } },
     context: { id: "task-uuid" }, assign: { task_id: "task-uuid", assignment: { agent: "B", device_id: "d", session_id: "s" } },
     transition: { task_id: "task-uuid", state: "working", assignment_epoch: 4, session_id: "s" },
+    coordinate: { task_id: "task-uuid", target_device_id: "d2", assignment_epoch: 4 },
   };
   for (const [name, spec] of Object.entries(COMMANDS)) {
     await client.execute(name, bodies[name]);
@@ -268,8 +269,9 @@ test("help needs no config and documents receipt semantics", async (t) => {
   fs.unlinkSync(path.join(home, "config.json"));
   const result = await command(CLI, ["--help"], home);
   assert.equal(result.code, 0);
-  assert.deepEqual(json(result).commands, Object.keys(COMMANDS));
+  assert.deepEqual(json(result).commands, [...Object.keys(COMMANDS), "validate"]);
   assert.ok(json(result).notes.some((s) => s.includes("receipt")));
+  assert.ok(json(result).notes.some((s) => s.includes("validate")));
 });
 
 // A schema-builder stub tests registration/forwarding only. SDK owns all protocol framing.
@@ -282,12 +284,12 @@ function mockZod() {
   return { string: () => schema("string"), number: () => schema("number"), boolean: () => schema("boolean"), union: (shape) => schema("union", shape), unknown: () => schema("unknown"), object: (shape) => schema("object", shape), array: (shape) => schema("array", shape) };
 }
 
-test("MCP registers nine tools and uses the same authenticated client without SDK dependency", async (t) => {
+test("MCP registers eleven tools including offline validate and uses the same authenticated client", async (t) => {
   const { client, calls } = await fixture(t);
   const tools = new Map();
   const server = { registerTool: (name, spec, handler) => tools.set(name, { spec, handler }) };
   assert.equal(registerAgentTools(server, client, mockZod()), server);
-  assert.equal(tools.size, 9);
+  assert.equal(tools.size, 11);
   for (const name of Object.keys(COMMANDS)) {
     const tool = tools.get(`agent_desk_${name}`);
     assert.ok(tool);
@@ -299,6 +301,15 @@ test("MCP registers nine tools and uses the same authenticated client without SD
     assert.equal(calls.at(-1).headers["x-agent-desk-agent-key"], KEY);
     if (COMMANDS[name].method === "POST") assert.deepEqual(calls.at(-1).body, input);
   }
+  const callsBeforeValidate = calls.length;
+  const valTool = tools.get("agent_desk_validate");
+  assert.ok(valTool);
+  assert.equal(valTool.spec.annotations.readOnlyHint, true);
+  const validRes = await valTool.handler({ project: "P", agent: "Carbon", state: "working", task: "Check" });
+  assert.equal(validRes.structuredContent.ok, true);
+  const badRes = await valTool.handler({ project: "P", agent: "Carbon", state: "waiting", waiting_for: "bad_reason" });
+  assert.equal(badRes.structuredContent.ok, false);
+  assert.equal(calls.length, callsBeforeValidate, "offline MCP validate must not send HTTP requests");
   assert.match(tools.get("agent_desk_ack").spec.description, /does NOT accept or complete/);
 });
 
@@ -371,7 +382,10 @@ test("official SDK stdio list/call smoke with only synthetic loopback HTTP", { s
   try {
     await client.connect(transport);
     const listed = await client.listTools();
-    assert.equal(listed.tools.length, 9);
+    assert.equal(listed.tools.length, 11);
+    const valRes = await client.callTool({ name: "agent_desk_validate", arguments: { project: "P", agent: "A", state: "working" } });
+    assert.equal(valRes.structuredContent.ok, true);
+    assert.equal(calls.length, 0);
     const result = await client.callTool({ name: "agent_desk_ack", arguments: { project: "P", agent: "A", message_id: "synthetic-uuid" } });
     assert.equal(result.isError, undefined);
     assert.equal(calls.at(-1).url, "/api/agent/ack");

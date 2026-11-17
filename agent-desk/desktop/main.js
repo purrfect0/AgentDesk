@@ -151,6 +151,16 @@ function showPeers() {
   win.webContents.executeJavaScript("window.abPeers && window.abPeers()").catch(() => {});
 }
 
+function showNotifySettings() {
+  showMain();
+  win.webContents.executeJavaScript("window.abNotifySettings && window.abNotifySettings()").catch(() => {});
+}
+
+function showDiagnostics() {
+  showMain();
+  win.webContents.executeJavaScript("window.abDiagnostics && window.abDiagnostics()").catch(() => {});
+}
+
 // --- tray --------------------------------------------------------------------------
 
 function createTray() {
@@ -165,6 +175,8 @@ function rebuildTrayMenu() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "Открыть Agent Desk", click: () => showMain() },
     { label: "Другие компьютеры…", click: () => showPeers() },
+    { label: "Тихие часы и уведомления…", click: () => showNotifySettings() },
+    { label: "Диагностика и отказы…", click: () => showDiagnostics() },
     { type: "separator" },
     { label: "Всплывающие окна", type: "checkbox", checked: !!desk.config.notify, click: (i) => setConfig({ notify: i.checked }) },
     { label: "Запускать вместе с Windows", type: "checkbox", checked: !!desk.config.autostart, click: (i) => setConfig({ autostart: i.checked }) },
@@ -176,7 +188,7 @@ function rebuildTrayMenu() {
 function updateTray() {
   if (!tray) return;
   const open = desk.state.todos.filter((t) => !t.done_at && !t.superseded_by && !t.quiet && !["receipt", "ack", "delivery"].includes(t.kind) && !(t.kind === "forward" && (t.forwarded_at || t.acked_at || (t.delivery_target && t.delivery_target !== desk.config.device_id)))).length;
-  const submitted = Object.values(desk.state.tasks || {}).filter((t) => t.state === "submitted").length;
+  const submitted = Object.values(desk.state.tasks || {}).filter((t) => t.state === "submitted" && (!t.coordinator_device_id || t.coordinator_device_id === desk.config.device_id)).length;
   const quiet = desk._inQuietHours() ? " · тихие часы" : "";
   const parts = [];
   if (open) parts.push(`нужно сделать: ${open}`);

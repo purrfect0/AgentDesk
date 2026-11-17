@@ -20,9 +20,11 @@ node core/cli.js status
 node core/cli.js context <task-UUID>
 node core/cli.js ack --project Example --agent Astra --session-id session-1 --message-id <message-UUID>
 node core/cli.js submit --file marker.json
+node core/cli.js validate --file marker.json
 node core/cli.js assign --file assignment.json
 node core/cli.js transition --file transition.json
 node core/cli.js handoff --file handoff.json
+node core/cli.js coordinate --file coordinate.json
 ```
 
 JSON input: pipe one object to stdin, supply `--stdin`, use `--file FILE`, or `--json '{...}'`. Choose one input source. In an interactive terminal, omitted input means an empty object; redirected stdin is read until EOF. Field flags override JSON fields. `read` and `context` also accept `--id UUID`. Unknown/duplicate flags and unsupported GET fields fail rather than being silently ignored.
@@ -69,7 +71,9 @@ Transition payload includes `task_id`, `project`, `agent`, `device_id`, `session
 | assign | POST `/api/agent/task/assign` |
 | transition | POST `/api/agent/task/transition` |
 | handoff | POST `/api/agent/task/handoff` |
+| coordinate | POST `/api/agent/task/coordinate` |
 | context | GET `/api/agent/context?id=` |
+| validate | Offline local validation (`core/marker-schema.js`, no HTTP call) |
 
 There are intentionally no broad admin, mail-root configuration or unscoped `/api/tasks/*` client routes.
 
@@ -80,9 +84,9 @@ Official maintained SDK, stable npm metadata checked 2026-11-16:
 - `@modelcontextprotocol/sdk@1.32.2` — official `modelcontextprotocol/typescript-sdk`, high-level `McpServer` and `StdioServerTransport`.
 - `zod@4.6.7` — direct schema dependency (`zod/v4`).
 
-The wrapper uses the official SDK for initialization, schemas, framing, tool listing/calls and transport. No hand-written JSON-RPC exists. The dependency/package/build owner must add these dependencies; this implementation does not change the lockfile or install packages.
+The wrapper uses the official SDK for initialization, schemas, framing, tool listing/calls and transport. No hand-written JSON-RPC exists.
 
-Entrypoint: `node core/mcp.js [--home DIR] [--server LOOPBACK_HTTP_ORIGIN] [--timeout MS]`. Nine tools: `agent_desk_inbox`, `agent_desk_read`, `agent_desk_ack`, `agent_desk_submit`, `agent_desk_status`, `agent_desk_handoff`, `agent_desk_context`, `agent_desk_assign`, `agent_desk_transition`. Read-only tools are annotated accordingly. Mutation schemas preserve structured metadata and delegate final validation to the HTTP API. Tool results include JSON text and `structuredContent`; operational failures set `isError: true` with the same error envelope.
+Entrypoint: `node core/mcp.js [--home DIR] [--server LOOPBACK_HTTP_ORIGIN] [--timeout MS]`. Eleven tools: `agent_desk_inbox`, `agent_desk_read`, `agent_desk_ack`, `agent_desk_submit`, `agent_desk_status`, `agent_desk_handoff`, `agent_desk_context`, `agent_desk_assign`, `agent_desk_transition`, `agent_desk_coordinate`, `agent_desk_validate`. Read-only tools (including offline `agent_desk_validate`) are annotated accordingly. Mutation schemas preserve structured metadata and delegate final validation to the HTTP API. Tool results include JSON text and `structuredContent`; operational failures set `isError: true` with the same error envelope.
 
 Example MCP host configuration (replace paths; **do not include the key**):
 

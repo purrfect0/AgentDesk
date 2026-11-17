@@ -3,6 +3,8 @@
 /** Official MCP SDK stdio server; every tool is a thin local AgentClient call. */
 const { AgentClient, AgentClientError, errorResult } = require("./agent-client.js");
 const { parseArguments } = require("./cli.js");
+const { diagnoseMarker, MARKER_TEMPLATES } = require("./marker-schema.js");
+const PKG_VERSION = require("../package.json").version;
 
 const DESCRIPTIONS = Object.freeze({
   inbox: "List local agent inbox messages and tasks, optionally filtered by project, agent and session_id.",
@@ -14,6 +16,8 @@ const DESCRIPTIONS = Object.freeze({
   context: "Read task context and bounded local verification checks by task UUID. Verification is evidence, not a claim that code was remotely pushed.",
   assign: "Assign on the coordinator device with title, full prompt (max 20000 characters) and recipient agent/device/session/role/adapter. Creates an owner-queue message; returns assignment_message_id for read/ACK. Assigning or copying is not delivery. Do not repeat assign to resend: read the existing assignment_message_id.",
   transition: "Transition task execution state independently of mailbox receipts. Send task_id, assignment_epoch and session_id; do not treat ACK as accepted/done.",
+  coordinate: "Transfer or reclaim coordinator authority for a task across paired Agent Desk devices.",
+  validate: "Validate an agent marker offline against the shared Agent Desk schema (state, waiting_for, field limits, checkpoint keys) without network or state writes.",
 });
 
 function toolSchemas(z) {
@@ -49,11 +53,29 @@ function toolSchemas(z) {
     context: z.object({ id: text() }).strict(),
     assign: taskMutation(),
     transition: taskMutation(),
+    coordinate: z.object({
+      task_id: optionalText(), id: optionalText(), target_device_id: optionalText(), coordinator_device_id: optionalText(),
+      assignment_epoch: epoch(), request_id: optionalText(), note: z.string().max(1000).optional(),
+    }).passthrough(),
+    validate: z.object({
+      project: optionalText(), agent: optionalText(), state: optionalText(), waiting_for: optionalText(),
+      execution_state: optionalText(), task_id: optionalText(), project_id: optionalText(), session_id: optionalText(),
+      device_id: optionalText(), assignment_epoch: epoch(), seq: z.number().int().nonnegative().optional(),
+      task: optionalText(), result: optionalText(), note: optionalText(), message: z.string().max(25000).optional(),
+      checkpoint: metadata(), artifacts: z.array(z.unknown()).optional(),
+    }).passthrough(),
   };
 }
 
 async function callAgentTool(client, command, args = {}) {
   try {
+    if (command === "validate") {
+      const diag = diagnoseMarker(args, args?.project || "");
+      const value = diag.not_a_marker
+        ? { ok: false, errors: [{ code: "NOT_A_MARKER", field: "agent/state", expected: ["agent", "state"], hint: "Укажите хотя бы agent и state.", retryable: false, message: "Объект не распознан как маркер Agent Desk." }], templates: Object.keys(MARKER_TEMPLATES) }
+        : { ok: diag.ok, project: diag.project, seq: diag.seq, task_id: diag.task_id || null, errors: diag.errors };
+      return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
+    }
     const value = await client.execute(command, args);
     return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
   } catch (error) {
@@ -65,7 +87,7 @@ async function callAgentTool(client, command, args = {}) {
 function registerAgentTools(server, client, z) {
   const schemas = toolSchemas(z);
   for (const [command, description] of Object.entries(DESCRIPTIONS)) {
-    const readOnly = ["inbox", "read", "status", "context"].includes(command);
+    const readOnly = ["inbox", "read", "status", "context", "validate"].includes(command);
     server.registerTool(`agent_desk_${command}`, {
       title: `Agent Desk: ${command}`,
       description,
@@ -94,7 +116,7 @@ function loadSdk() {
 async function startMcp(options = {}) {
   const client = new AgentClient(options);
   const { McpServer, StdioServerTransport, z } = loadSdk();
-  const server = new McpServer({ name: "agent-desk", version: "1.0.0" }, { maxToolInputElements: 10000 });
+  const server = new McpServer({ name: "agent-desk", version: PKG_VERSION }, { maxToolInputElements: 10000 });
   registerAgentTools(server, client, z);
   await server.connect(new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: 512 * 1024 }));
   return server;
@@ -103,7 +125,7 @@ async function startMcp(options = {}) {
 async function main() {
   const { options, help } = parseArguments(process.argv.slice(2), { mcp: true });
   if (help) {
-    process.stderr.write("Agent Desk MCP: node core/mcp.js [--home DIR] [--server LOOPBACK_HTTP_ORIGIN] [--timeout MS]\nTools: agent_desk_{inbox,read,ack,submit,status,handoff,context,assign,transition}\n");
+    process.stderr.write("Agent Desk MCP: node core/mcp.js [--home DIR] [--server LOOPBACK_HTTP_ORIGIN] [--timeout MS]\nTools: agent_desk_{inbox,read,ack,submit,status,handoff,context,assign,transition,coordinate,validate}\n");
     return;
   }
   const server = await startMcp(options);

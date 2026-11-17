@@ -1516,9 +1516,13 @@ function uncPath(path) {
 function agentPrompt(watch) {
   const unc = uncPath(watch.path);
   const project = watch.project || "<проект>";
+  const regNames = (data?.config?.agent_registry?.[watch.project] || []).filter((r) => r.status !== "archived").map((r) => r.name);
+  const cfgNames = [...(data?.config?.agents?.[watch.project] || []), ...(data?.config?.agents?.["*"] || [])];
+  const knownNames = [...new Set([...regNames, ...cfgNames].filter(Boolean))];
+  const agentListText = knownNames.length ? knownNames.join(", ") : "Codex, Carbon, Astra";
   return `Agent Desk — отметки статуса для владельца (проект ${project})
 
-Владелец не видит все чаты сразу. Чтобы он не забывал пересылать работу, при каждой смене своего состояния создай НОВЫЙ файл-маркер .json в папке:
+Владелец не видит все чаты сразу. Чтобы он не забывал пересылать работу, при каждой смене своего состояния отправь статус через штатный CLI/MCP (agentdesk submit / agent_desk_submit) или создай НОВЫЙ файл-маркер .json в папке:
   ${watch.path}${unc ? `\n  (с другого компьютера: ${unc})` : ""}
 
 Когда писать: начал задачу; перешёл к следующему этапу; ждёшь ответа владельца/ревью/ресурс; застрял; сдал результат; закончился лимит модели; свободен.
@@ -1532,21 +1536,21 @@ function agentPrompt(watch) {
  "to": "Codex", "message": "Opus (1): ревью clockfix 9f0fc900 готово, PASS с 2 замечаниями. Отчёт: AZS-Shared\\\\mail\\\\opus1-review-m42.md, ветка review/m42, SHA 1a2b3c4.",
  "result": "AZS-Shared\\\\mail\\\\opus1-review-m42.md"}
 
-Поля:
-- agent — твоё постоянное имя, точно одно из: Codex, Hoplite, Opus (1), Opus (2), Astra.
+Поля и лимиты (превышение отклоняется, перед отправкой можно проверить через agentdesk validate или agent_desk_validate):
+- agent — твоё постоянное имя в проекте: ${agentListText}.
 - session_id — придумай при старте нового чата/после сброса памяти; seq — 1, 2, 3… внутри сессии; event_id — уникальный (session_id-seq).
 - state — working | waiting | done | blocked | idle.
-- waiting_for (только при waiting) — owner_input (нужен ответ владельца) | owner_forward (владелец должен переслать) | reviewer | coordinator_review | resource (телефон/сервер занят) | model_limit (закончился лимит).
+- waiting_for (обязателен при waiting) — owner_input (нужен ответ владельца) | owner_forward (владелец должен переслать) | reviewer | coordinator_review | resource (телефон/сервер занят) | model_limit (закончился лимит) | assignment.
 - phase (необязательно) — assigned | implementing | testing | ready_for_review | ready_for_host | accepted.
 - task_id — UUID задачи, остаётся тем же при передаче другой сессии; получите его через inbox/status Agent Desk или от ведущего. project_id, device_id и assignment_epoch берите из актуального задания; не меняйте их сами.
-- task — краткое название задачи, одной строкой (не заменяет task_id).
-- execution_state — assigned | working | submitted | accepted | rework | blocked. Жизненный цикл задачи независим от state маркера и закрытия напоминания. Приёмку accepted подтверждает ведущий; сдача результата — submitted.
-- checkpoint — структурированные repo, branch, commit, report, manifest, next_step, constraints, skills; artifacts — список path/hash/status. Только разрешённые пути, без секретов и произвольных команд.
+- task — краткое название задачи, одной строкой (до 500 символов, не заменяет task_id).
+- execution_state — assigned | working | submitted | accepted | rework | blocked | cancelled | archived. Жизненный цикл задачи независим от state маркера и закрытия напоминания. Приёмку accepted/rework/cancelled/archived подтверждает ведущий; сдача результата — submitted.
+- checkpoint — структурированные repo, branch, commit, report, manifest, next_step, verification_steps, out_dir, constraints, skills; artifacts — список path/hash/status. Только разрешённые пути, без секретов и произвольных команд.
 - to — кому владелец должен переслать результат (имя агента). Указывай, когда сдал работу или ждёшь ревью/приёмки.
-- message — готовый короткий текст, который владелец вставит в чат адресата: что сделано, ветка/SHA, путь к отчёту, что нужно от адресата.
+- message — готовый короткий текст для пересылки адресату (до 20000 символов, общий конверт <= 58000 Б UTF-8): что сделано, ветка/SHA, путь к отчёту, что нужно от адресата.
 - message_id — глобальный UUID сообщения, не локальный display_id AD-n. При ответе используйте неизменный task_id задания.
 - ack — если переслали «[Agent Desk] message_id: <UUID>», в первом маркере working укажите "ack": "<этот UUID>" (несколько — списком UUID). Это только квитанция получения: ACK не означает принятие задачи, выполнение или приёмку. Старые локальные AD-n/AB-n поддерживаются для совместимости, но не используйте их для новых сообщений между компьютерами.
-- note, result — необязательно: пояснение и путь к отчёту.
+- note (до 1000 символов), result (до 400 символов — только краткий итог или путь к отчёту).
 
 Примеры одной строкой:
 {"agent":"Hoplite","session_id":"hop-m41-a","seq":1,"event_id":"hop-m41-a-1","state":"working","execution_state":"working","phase":"assigned","project_id":"22222222-2222-4222-8222-222222222222","device_id":"desk-example","assignment_epoch":2,"task_id":"f5a278d6-957e-4e21-ae85-04889d5227ad","task":"M41: офлайн-сверка O6","ack":"4922e0e3-c28f-4cfa-8a76-2bc264c39cf8"}
@@ -2476,6 +2480,8 @@ window.abFocus = (proj, todoId) => {
 
 // Called by the desktop app for a popup about another computer (a pairing request, a new pair).
 window.abPeers = () => { if (data && !document.querySelector("#peers-live")) ACTIONS.peers(); };
+window.abNotifySettings = () => { if (data) notifySettingsDialog(); };
+window.abDiagnostics = () => { if (data) diagnosticsDialog(); };
 
 // --- desktop app window (Electron: desktop/preload.js gives window.agentDesk) -----
 

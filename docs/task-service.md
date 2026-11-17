@@ -57,12 +57,12 @@ Existing assignment requires `task_id` and the **current top-level** `assignment
 
 `execution_state` aliases `state`; `task_id` aliases `id`. Reporter agent/device/session and current epoch are mandatory and must match the task binding. Optional project/project_id must match. Transition graph:
 
-- assigned → working/submitted/blocked
-- working → submitted/blocked
-- submitted → accepted/rework/blocked
-- rework → working/submitted/blocked
-- blocked → assigned/working/submitted/rework
-- accepted → no different state (explicit reassignment is required)
+- assigned → working/submitted/blocked/cancelled/archived
+- working → submitted/blocked/cancelled/archived
+- submitted → accepted/rework/blocked/cancelled/archived
+- rework → working/submitted/blocked/cancelled/archived
+- blocked → assigned/working/submitted/rework/cancelled/archived
+- accepted/cancelled/archived → rework (explicit coordinator reopen) or archived (with status_reason)
 
 Same-state metadata updates are allowed. Acceptance/rework require execution on the coordinator desk. Worker identity fields remain accepted for the existing owner UI's compare-and-set request, but review history records a separate `actor:{agent:'owner',device_id:<coordinator>,session_id:'',role:'owner'}`, not a worker review claim.
 

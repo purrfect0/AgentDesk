@@ -772,4 +772,26 @@ if (process.argv.includes("--serve")) {
     await h.run('ACTIONS["rotate-limit-session"]()');
     assert.ok(calls.some((c) => c.url === "/api/agents/rotate-session" && c.body.agent === "Claude Opus"));
   });
+
+  test("CP5 UI: agentPrompt lists active project registry agents, field limits, offline validate, and exposes tray hooks", () => {
+    const state = fixture();
+    state.config.agent_registry = {
+      Demo: [
+        { name: "Carbon", status: "active" },
+        { name: "RetiredBot", status: "archived" },
+      ],
+    };
+    state.config.agents = { Demo: ["Codex"], "*": [] };
+    const h = harness(state);
+    const prompt = h.run('agentPrompt({ project: "Demo", path: "C:\\\\Synthetic\\\\inbox" })');
+    assert.match(prompt, /Carbon, Codex/);
+    assert.equal(prompt.includes("RetiredBot"), false, "archived agents must not be suggested in instructions");
+    assert.match(prompt, /agent_desk_validate/);
+    assert.match(prompt, /400 символов/);
+
+    h.run("window.abNotifySettings()");
+    assert.match(h.mounted.at(-1).title, /Тихие часы|Уведомления/i);
+    h.run("window.abDiagnostics()");
+    assert.match(h.mounted.at(-1).title, /Диагностика/i);
+  });
 }

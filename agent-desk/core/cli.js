@@ -7,10 +7,12 @@ const { diagnoseMarker, MARKER_TEMPLATES } = require("./marker-schema.js");
 const HELP = {
   ok: true,
   usage: "node core/cli.js <command> [id] [--home DIR] [--server LOOPBACK_HTTP_ORIGIN] [--file FILE | --json OBJECT | --stdin] [--field VALUE]",
-  commands: Object.keys(COMMANDS),
+  commands: [...Object.keys(COMMANDS), "validate"],
   notes: [
     "JSON is read from piped stdin automatically unless --file or --json is supplied. Flags override JSON fields.",
     "Use --id or a positional UUID for read/context. Use --message-id for ack.",
+    "validate runs offline against the shared marker schema (no running server or config needed) and returns structured field hints.",
+    "coordinate transfers or reclaims task coordination between paired desks.",
     "Hyphenated field flags map to snake_case. --checkpoint, --artifacts, --assignment, --binding, --manifest, --constraints, --skills and --ack accept JSON.",
     "--needs-forward [true|false] is boolean; --seq and --assignment-epoch are integers. --timeout is milliseconds.",
     "Errors are JSON on stdout with a nonzero exit code. ACK is a receipt, not task acceptance/completion.",
@@ -96,7 +98,7 @@ function parseArguments(argv, { mcp = false } = {}) {
   const command = positions.shift();
   if (command === "help") help = true;
   if (!help && (!command || (!Object.hasOwn(COMMANDS, command) && command !== "validate"))) {
-    throw new AgentClientError("UNKNOWN_COMMAND", "Choose inbox, read, ack, submit, status, handoff, context, assign, transition or validate; use --help.");
+    throw new AgentClientError("UNKNOWN_COMMAND", "Choose inbox, read, ack, submit, status, handoff, context, assign, transition, coordinate or validate; use --help.");
   }
   if (positions.length) {
     if (!["read", "context"].includes(command) || positions.length !== 1 || fields.id !== undefined) {
