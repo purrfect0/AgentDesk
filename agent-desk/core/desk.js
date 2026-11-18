@@ -16,7 +16,7 @@ const { AdapterRegistry } = require("./adapters.js");
 const { UpdateManager } = require("./updater.js");
 const { ChatBridge } = require("./bridge.js");
 
-const VERSION = "2.4.1"; // the app version, the same as in package.json (a test checks it)
+const VERSION = "2.4.2"; // the app version, the same as in package.json (a test checks it)
 const PROTOCOL = 3;
 const STATES = new Set(["working", "waiting", "done", "blocked", "idle"]);
 const WAITING_FOR = new Set([
@@ -227,13 +227,25 @@ function parseMarker(text, folderProject, now = Date.now()) {
   return ev;
 }
 
+const OWNER_RECIPIENTS = new Set([
+  "владелец", "владельцу", "owner", "human", "user", "хозяин", "хозяину", "человек", "человеку", "я", "мне", "self",
+]);
+
+function isOwnerOrSelfRecipient(to, agent) {
+  const c = compact(to);
+  if (!c) return true;
+  if (OWNER_RECIPIENTS.has(c)) return true;
+  return Boolean(agent && c === compact(agent));
+}
+
 function forwardKind(ev) {
-  if (!ev.to || ev.waiting_for === "assignment") return false;
+  if (!ev.to || ev.waiting_for === "assignment" || isOwnerOrSelfRecipient(ev.to, ev.agent)) return false;
   return ev.state === "done" || ev.needs_forward || FORWARD_WAITS.has(ev.waiting_for);
 }
 
 function todoKind(ev) {
   if (forwardKind(ev)) return "forward";
+  if (ev.state === "done" && ev.waiting_for !== "assignment") return "done";
   if (ev.state === "blocked") return "blocked";
   if (ev.state === "waiting" && ev.waiting_for === "model_limit") return "limit";
   if (ev.state === "waiting" && (ev.waiting_for === "" || ev.waiting_for === "owner_input")) return "reply";
@@ -312,7 +324,7 @@ function nameMap(value, valueIsList) {
 
 const { PeerLink } = require("./peers.js"); // PC <-> laptop: reminders between desks of one Wi-Fi
 
-const REMINDER_KINDS = new Set(["forward", "reply", "blocked", "limit"]);
+const REMINDER_KINDS = new Set(["forward", "reply", "blocked", "limit", "done"]);
 
 // Win98 icon (web/icons/<name>.png, 32x32) of each alert kind: PC popup, phone notification.
 const ALERT_ICON = {
@@ -457,6 +469,11 @@ class Desk extends EventEmitter {
       }
       t.project_id ||= stableId(`project:${compact(t.project)}`);
       t.updated ??= t.created;
+      if (!t.done_at && t.kind === "forward" && t.purpose !== "assignment" && t.purpose !== "rework" && t.to && isOwnerOrSelfRecipient(t.to, t.agent)) {
+        t.kind = "done";
+        t.to = "";
+        delete t.warning;
+      }
     }
     const maxId = s.todos.reduce((m, t) => Math.max(m, Number(t.id) || 0), 0);
     s.next_id = Math.max(Number(s.next_id) || 1, maxId + 1);
@@ -887,6 +904,7 @@ class Desk extends EventEmitter {
     const who = `${t.agent} (${t.project})`;
     const text = {
       forward: [`${who}: переслать → ${t.to}${again}`, `Перешлите результат агенту ${t.to}`],
+      done: [`${who} выполнил задачу${again}`, `Ознакомьтесь с отчётом агента ${t.agent} и закройте уведомление`],
       reply: [`${who} ждёт вашего ответа`, `Ответьте агенту ${t.agent}: он ждёт вашего решения`],
       blocked: [`${who} заблокирован`, `Помогите агенту ${t.agent}: он не может продолжить`],
       limit: [`${who}: закончился лимит модели`, `Начните новую сессию или смените модель для ${t.agent}`],
@@ -999,6 +1017,9 @@ class Desk extends EventEmitter {
     const s = this.state;
     ev.agent = this.canonical(ev.project, ev.agent);
     if (ev.to) ev.to = this.canonical(ev.project, ev.to);
+    if (ev.to && isOwnerOrSelfRecipient(ev.to, ev.agent) && (ev.state === "done" || (ev.state === "waiting" && (ev.waiting_for === "" || ev.waiting_for === "owner_input")))) {
+      ev.to = "";
+    }
     if (ev.from) ev.from = this.canonical(ev.project, ev.from);
     const key = `${ev.project}/${ev.agent}`;
     const agent = s.agents[key] || { project: ev.project, agent: ev.agent, first_seen: ev.received };
@@ -1041,7 +1062,7 @@ class Desk extends EventEmitter {
     if (kind) {
       const message = ev.message || defaultMessage(ev);
       const existing = s.todos.find((t) => !t.done_at && t.kind === kind && t.project === ev.project && this._sameAgent(t.agent, ev.agent)
-        && (kind !== "forward" || (t.task === ev.task && this._sameAgent(t.to, ev.to))));
+        && (kind === "forward" ? (t.task === ev.task && this._sameAgent(t.to, ev.to)) : kind === "done" ? t.task === ev.task : true));
       if (existing && (kind !== "forward" || existing.message === message)) {
         const changed = existing.message !== message;
         Object.assign(existing, { note: ev.note, result: ev.result, waiting_for: ev.waiting_for, message, updated: ev.received });
@@ -2397,6 +2418,6 @@ class Desk extends EventEmitter {
 }
 
 module.exports = {
-  Desk, parseMarker, parseAcks, forwardText, forwardKind, todoKind, compact, writeJsonAtomic, NotAMarker,
+  Desk, parseMarker, parseAcks, forwardText, forwardKind, todoKind, isOwnerOrSelfRecipient, compact, writeJsonAtomic, NotAMarker,
   VERSION, PROTOCOL, STATES, WAITING_FOR,
 };

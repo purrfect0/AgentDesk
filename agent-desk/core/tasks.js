@@ -502,16 +502,16 @@ class TaskService {
     return true;
   }
 
-  _retireOpenAssignmentTodos(task, reasonState) {
+  _retireOpenAssignmentTodos(task, reasonState, actor = null) {
     const todos = this.desk.state.todos;
     if (!Array.isArray(todos)) return;
     const time = task.updated || now();
     for (const row of todos) {
-      if (row.task_id === task.task_id && !row.done_at) {
-        row.done_at = time;
-        row.closed_reason = reasonState;
-        row.updated = time;
-      }
+      if (row.task_id !== task.task_id || row.done_at) continue;
+      if (row.kind === "done" && reasonState === "accepted" && actor?.agent && actor.role !== "owner" && this._same(actor.agent, row.agent, task.project)) continue;
+      row.done_at = time;
+      row.closed_reason = reasonState;
+      row.updated = time;
     }
   }
 
@@ -540,7 +540,7 @@ class TaskService {
           }
         }
       }
-      if (["accepted", "cancelled", "archived"].includes(task.state)) this._retireOpenAssignmentTodos(task, task.state);
+      if (["accepted", "cancelled", "archived"].includes(task.state)) this._retireOpenAssignmentTodos(task, task.state, putOpts.actor);
       if (createdTodo && !putOpts.selfStarted) this.desk.bridge?.tryAutoDispatchTodo?.(createdTodo);
       state.tasks = { ...state.tasks, [task.task_id]: task };
       state.bindings = { ...state.bindings, [binding.id]: binding };

@@ -23,7 +23,7 @@ const WAIT_LABEL = {
   resource: "ждёт телефон/сервер",
   model_limit: "закончился лимит модели",
 };
-const TODO_ICON = { forward: "envelope_closed-1", reply: "msg_question-2", blocked: "msg_error-2", limit: "msg_warning-2" };
+const TODO_ICON = { forward: "envelope_closed-1", done: "check-1", reply: "msg_question-2", blocked: "msg_error-2", limit: "msg_warning-2" };
 const stateLabel = (a) => (a.state === "waiting" && WAIT_LABEL[a.waiting_for]) || STATE_LABEL[a.state] || a.state;
 // Forwarded-but-unconfirmed reminders stay visible but no longer need the owner.
 // Delivery/ACK receipts are quiet telemetry, never owner actions or task acceptance.
@@ -58,7 +58,7 @@ let seenAlerts = null;
 let online = true;
 let lastUpdated = null;
 let dialogReturnFocus = null;
-const CLIENT_VERSION = "2.4.1";
+const CLIENT_VERSION = "2.4.2";
 let phoneNotify = localStorage.getItem("ad.phoneNotify") !== "0";
 let dismissedUpdate = localStorage.getItem("ad.dismissUpdate") || "";
 
@@ -265,6 +265,7 @@ function todoText(t) {
     const handled = t.forwarded_at || t.acked_at || t.done_at || (t.delivery_target && data?.device_id && t.delivery_target !== data.device_id);
     return handled ? `Сообщение для <b class="to">${esc(t.to)}</b> от ${who}` : `Переслать <b class="to">${esc(t.to)}</b> работу от ${who}`;
   }
+  if (t.kind === "done") return `${who} выполнил задачу`;
   if (t.kind === "reply") return `${who} ждёт вашего ответа`;
   if (t.kind === "limit") return `${who}: закончился лимит модели`;
   return `${who} заблокирован`;
@@ -296,7 +297,12 @@ function todoStatus(t) {
   }
   const waitAge = ago(t.created);
   const tail = waitAge ? ` <span class="sub">(${esc(waitAge)})</span>` : "";
-  return { reply: `<b>ждёт ответа</b>${tail}`, limit: `<b>нужна новая сессия</b>${tail}`, blocked: `<b>нужна помощь</b>${tail}` }[t.kind] || "";
+  return {
+    done: `<b>выполнено</b>${tail}`,
+    reply: `<b>ждёт ответа</b>${tail}`,
+    limit: `<b>нужна новая сессия</b>${tail}`,
+    blocked: `<b>нужна помощь</b>${tail}`,
+  }[t.kind] || "";
 }
 
 function fromDeviceLabel(t) {
@@ -532,20 +538,25 @@ function ownerActionItems() {
   const todos = (data?.todos || []).filter((t) => inProject(t) && needsAction(t));
   const assignTodos = todos.filter((t) => t.kind === "forward" && t.purpose === "assignment");
   const reportTodos = todos.filter((t) => t.kind === "forward" && t.purpose !== "assignment");
+  const doneTodos = todos.filter((t) => t.kind === "done");
   const replyTodos = todos.filter((t) => t.kind === "reply");
   const submittedTasks = taskList().filter((t) => inProject(t) && t.state === "submitted");
   const resourceAgents = Object.entries(data?.agents || {}).map(([k, a]) => ({ ...a, _rowKey: k }))
     .filter((a) => inProject(a) && a.state === "waiting" && a.waiting_for === "resource");
-  return { assignTodos, reportTodos, replyTodos, submittedTasks, resourceAgents };
+  return { assignTodos, reportTodos, doneTodos, replyTodos, submittedTasks, resourceAgents };
 }
 function renderOwnerActions() {
   const box = $("#owner-actions");
   if (!box || !data) return;
-  const { assignTodos, reportTodos, replyTodos, submittedTasks, resourceAgents } = ownerActionItems();
+  const { assignTodos, reportTodos, doneTodos, replyTodos, submittedTasks, resourceAgents } = ownerActionItems();
   const btns = [];
   const cnt = (n) => (n > 1 ? ` (${n})` : "");
   if (assignTodos.length) btns.push(`<button type="button" data-action="quick-forward-assignment">Переслать задание${cnt(assignTodos.length)}</button>`);
   if (reportTodos.length) btns.push(`<button type="button" data-action="quick-forward-report">Переслать отчёт${cnt(reportTodos.length)}</button>`);
+  if (doneTodos.length) {
+    btns.push(`<button type="button" data-action="quick-open-done">Открыть отчёт${cnt(doneTodos.length)}</button>`);
+    btns.push(`<button type="button" data-action="quick-ack-done"${online ? "" : " disabled"}>Ознакомлен (закрыть)${cnt(doneTodos.length)}</button>`);
+  }
   if (replyTodos.length) btns.push(`<button type="button" data-action="quick-reply"${online ? "" : " disabled"}>Ответить${cnt(replyTodos.length)}</button>`);
   if (submittedTasks.length) btns.push(`<button type="button" data-action="quick-review"${online ? "" : " disabled"}>Проверить сдачу${cnt(submittedTasks.length)}</button>`);
   if (resourceAgents.length) btns.push(`<button type="button" data-action="quick-resource">Освободить ресурс${cnt(resourceAgents.length)}</button>`);
@@ -563,6 +574,7 @@ function cardAge(created) {
 }
 function todoRowTitle(t) {
   if (t.task) return t.task;
+  if (t.kind === "done") return `${t.agent} выполнил задачу`;
   if (t.kind === "reply") return `${t.agent} ждёт вашего ответа`;
   if (t.kind === "limit") return `${t.agent}: закончился лимит модели`;
   if (t.kind === "blocked") return `${t.agent} заблокирован`;
@@ -598,14 +610,26 @@ function renderTodos() {
   patch($("#todo-table tbody"), todos.map(t => {
     const act = needsAction(t);
     const cls = t.done_at ? "closed" : act ? `attn${t.kind === "forward" ? " attn-forward" : ""}` : "pending";
-    const ico = t.kind === "forward" && t.forwarded_at ? "envelope_open_sheet-1" : TODO_ICON[t.kind];
+    const ico = t.kind === "forward" && t.forwarded_at ? "envelope_open_sheet-1" : (TODO_ICON[t.kind] || "msg_information-0");
     const task = currentTask(t.task_id);
     const card = t.purpose === "assignment" && task ? taskCardNumber(task) : t.display_id || `AD-${t.id}`;
+    const fromHtml = t.purpose === "assignment"
+      ? `<b>${esc(t.agent || "Владелец")}</b><br><span class="sub">назн. №${esc(t.assignment_epoch)}</span>`
+      : `<b>${esc(t.agent || "—")}</b>`;
+    const toHtml = t.kind === "forward" && t.to
+      ? `<b class="to">→ ${esc(t.to)}</b>`
+      : `<span class="sub">Владельцу</span>`;
+    const resLine = t.kind === "done" && t.result ? `<br><span class="sub">Итог: ${esc(t.result)}</span>` : "";
+    const warnLine = t.warning && !t.done_at ? `<br><span class="bad">${esc(t.warning)}</span>` : "";
     return `<tr class="${cls}" tabindex="0" data-key="t:${t.id}" data-todo="${t.id}" aria-haspopup="menu" aria-controls="todo-context-menu" aria-expanded="${todoMenuId === t.id}"${act ? ` data-since="${esc(t.created)}" style="${accent(t.created)}"` : ""}>
       <td class="c-ico"><img src="${icon(ico)}" alt=""></td>
-      <td><code class="card-id">${esc(card)}</code><b>${esc(todoRowTitle(t))}</b><br><span class="sub">${esc(t.project)} · ${t.purpose === "assignment" ? `Назначение №${esc(t.assignment_epoch)}` : esc(t.agent)}${t.to ? ` → ${esc(t.to)}` : ""}</span>${peerNote(t)}</td>
-      <td class="status">${todoStatus(t)}</td>
-      <td class="todo-age"><time datetime="${esc(t.created)}" title="${esc(new Date(t.created).toLocaleString("ru-RU"))}">${esc(cardAge(t.created))}</time></td></tr>`;
+      <td class="c-card" data-label="Карточка"><code class="card-id">${esc(card)}</code></td>
+      <td class="c-proj" data-label="Проект"><b>${esc(t.project || "—")}</b></td>
+      <td class="c-from" data-label="Исполнитель">${fromHtml}</td>
+      <td class="c-to" data-label="Кому">${toHtml}</td>
+      <td class="c-topic" data-label="Тема"><b>${esc(todoRowTitle(t))}</b>${resLine}${warnLine}${peerNote(t)}</td>
+      <td class="status" data-label="Статус">${todoStatus(t)}</td>
+      <td class="todo-age" data-label="Когда"><time datetime="${esc(t.created)}" title="${esc(new Date(t.created).toLocaleString("ru-RU"))}">${esc(cardAge(t.created))}</time></td></tr>`;
   }).join(""));
   $("#todo-empty").textContent = searching ? "Ничего не найдено. Попробуйте номер карточки, имя агента или слова из задания." : todoFilter === "waiting" ? "Нет сообщений, ожидающих получения." : "Нет действий для владельца. Пересланные задания доступны в «Ждём получения», остальные — через поиск.";
   $("#todo-table").classList.toggle("hidden", todos.length === 0);
@@ -622,12 +646,14 @@ function renderTodoMenu(todo) {
   const copy = menu.querySelector('[data-action="copy-message"]');
   copy.disabled = !todoHasCopyableText(todo) || !!todo.superseded_by;
   copy.querySelector("span").textContent = todo.forwarded_at || todo.acked_at || todo.done_at
-    ? "Переслать снова (копировать)"
+    ? (todo.kind === "forward" ? "Переслать снова (копировать)" : "Копировать текст")
     : todo.kind === "forward" && todo.purpose === "assignment"
       ? "Переслать задание (копировать)"
       : todo.kind === "forward"
         ? "Переслать отчёт (копировать)"
-        : "Копировать промпт";
+        : todo.kind === "done"
+          ? "Копировать отчёт"
+          : "Копировать промпт";
   menu.querySelector('[data-action="mark-forwarded"]').disabled = !(online && isForwardPending(todo) && !todo.forwarded_at && !todo.acked_at && !todo.superseded_by);
   menu.querySelector('[data-action="done-selected"]').disabled = !online || !!todo.done_at;
   for (const action of ["copy-message", "mark-forwarded", "done-selected", "todo-details"]) menu.querySelector(`[data-action="${action}"]`).dataset.todoId = String(todo.id);
@@ -1669,7 +1695,7 @@ function leadPrompt(target = {}) {
 3. Придумай для своего чата уникальный session_id (например <имя>-lead-YYYYMMDD-a), зарегистрируй себя ведущим через bind (project, agent, session_id, role: "coordinator" — без создания пустых карточек!) и отправь стартовый статус working (seq: 1) через submit. Если делаешь задачу лично — создавай её через assign с self_started: true (чтобы не вешать владельцу лишнее напоминание на самого себя). Если во входящих есть сообщение с message_id — сразу подтверди его через ack.
 
 Шаг 2. Сам создавай задачи и обмен без участия владельца:
-1. Если задачу целесообразно сделать самому — веди её на своей карточке (self_started: true), регулярно обновляй этапы через submit и доведи до результата.
+1. Если ты единственный агент в проекте и делаешь задачу сам — веди её на своей карточке (self_started: true), обновляй этапы через submit, а когда закончишь и передавать результат другому агенту не нужно — отправь state: "done" БЕЗ поля "to" (не пиши "to": "Владелец" и не указывай своё же имя!), приложив краткий result и итоговый отчёт в message. Тогда у владельца появится аккуратное уведомление «выполнено» без ложного требования пересылки.
 2. Если работу выполняют другие агенты/сессии — декомпозируй план и создавай назначения через assign --file <временный.json> (многострочный UTF-8 JSON всегда передавай через --file, чтобы оболочка не ломала кавычки и кириллицу).
 3. В каждом assign указывай: project (и project_id, если уже известен), понятный title, agent, device_id, свежий session_id исполнителя (для прямой доставки в Codex можно указать adapter: "codex-cli" и UUID/имя треда Codex), role ("worker" или "reviewer"), checkpoint (branch, out_dir, verification_steps, next_step) и полный самодостаточный prompt (до 20000 символов, конверт <= 58000 Б UTF-8).
 4. Agent Desk сам допишет в конец копируемого сообщения точные project_id, task_id, assignment_epoch, session_id, device_id и message_id, а ты в конец prompt для исполнителя обязательно добавь короткие правила отчётности и автономного ожидания:
@@ -1728,8 +1754,8 @@ ${channelBlock}
 - task — краткое название задачи, одной строкой (до 500 символов, не заменяет task_id).
 - execution_state — assigned | working | submitted | accepted | rework | blocked | cancelled | archived. Жизненный цикл задачи независим от state маркера и закрытия напоминания. Приёмку accepted/rework/cancelled/archived подтверждает ведущий; сдача результата — submitted.
 - checkpoint — структурированные repo, branch, commit, report, manifest, next_step, verification_steps, out_dir, constraints, skills; artifacts — список path/hash/status. Только разрешённые пути, без секретов и произвольных команд.
-- to — кому владелец должен переслать результат (имя агента). Указывай, когда сдал работу или ждёшь ревью/приёмки.
-- message — готовый короткий текст для пересылки адресату (до 20000 символов, общий конверт <= 58000 Б UTF-8): что сделано, ветка/SHA, путь к отчёту, что нужно от адресата.
+- to — кому владелец должен переслать результат (имя другого агента). Указывай ТОЛЬКО когда реально передаёшь работу другому агенту/ревьюеру. Если ты один в проекте и передавать некому — НЕ указывай поле "to" (не пиши "Владелец" и не пиши своё имя): отправка "state": "done" без "to" оставит владельцу чистое уведомление о выполнении задачи!
+- message — готовый короткий текст для пересылки адресату или итоговый отчёт для владельца (до 20000 символов, общий конверт <= 58000 Б UTF-8): что сделано, ветка/SHA, путь к отчёту, что нужно дальше.
 - message_id — глобальный UUID сообщения, не локальный display_id AD-n. При ответе используйте неизменный task_id задания.
 - ack — если переслали «[Agent Desk] message_id: <UUID>», в первом маркере working укажите "ack": "<этот UUID>" (несколько — списком UUID). Это только квитанция получения: ACK не означает принятие задачи, выполнение или приёмку. Старые локальные AD-n/AB-n поддерживаются для совместимости, но не используйте их для новых сообщений между компьютерами.
 - note (до 1000 символов), result (до 400 символов — только краткий итог или путь к отчёту).
@@ -1737,7 +1763,8 @@ ${channelBlock}
 Примеры одной строкой:
 {"agent":"Hoplite","session_id":"hop-m41-a","seq":1,"event_id":"hop-m41-a-1","state":"working","execution_state":"working","phase":"assigned","project_id":"22222222-2222-4222-8222-222222222222","device_id":"desk-example","assignment_epoch":2,"task_id":"f5a278d6-957e-4e21-ae85-04889d5227ad","task":"M41: офлайн-сверка O6","ack":"4922e0e3-c28f-4cfa-8a76-2bc264c39cf8"}
 {"agent":"Opus (2)","session_id":"o2-v7-b","seq":5,"event_id":"o2-v7-b-5","state":"waiting","waiting_for":"owner_input","task":"v7: откатывать PR #41 или чинить?"}
-{"agent":"Astra","session_id":"astra-1110","seq":2,"event_id":"astra-1110-2","state":"waiting","waiting_for":"model_limit","task":"Ревью clockfix","note":"лимит до 03:00"}`;
+{"agent":"Astra","session_id":"astra-1110","seq":2,"event_id":"astra-1110-2","state":"waiting","waiting_for":"model_limit","task":"Ревью clockfix","note":"лимит до 03:00"}
+{"agent":"Carbon","session_id":"carbon-solo-1","seq":4,"event_id":"carbon-solo-1-4","state":"done","task":"Релиз 2.4.2","result":"Готово, тесты пройдены","message":"Сборка проверена, передавать другому агенту не требуется."}`;
 }
 
 // The PC builds the text (sender, addressee, message_id), so every device copies the same thing.
@@ -1773,7 +1800,9 @@ async function copyPromptText(text, button, recipient) {
     }, { wide: true });
     return false;
   }
-  $("#copy-status").textContent = `Скопировано${recipient ? ` для ${recipient}` : ""}. Вставьте в чат агента. Копирование не отмечает доставку или получение.`;
+  $("#copy-status").textContent = recipient
+    ? `Скопировано для ${recipient}. Вставьте в чат агента. Копирование не отмечает доставку или получение.`
+    : "Текст скопирован в буфер обмена.";
   if (button) {
     const label = button.querySelector("span") || button, previous = label.textContent;
     label.textContent = "Скопировано";
@@ -2071,6 +2100,24 @@ const ACTIONS = {
     await ensureFullTodo(target);
     await copyPromptText(forwardText(target), e?.target?.closest("button"), target.to);
   },
+  "quick-open-done"() {
+    const { doneTodos } = ownerActionItems();
+    const cur = resolveSelectedTodo();
+    const target = (cur && doneTodos.some((x) => x.id === cur.id) ? cur : doneTodos[0]) || null;
+    if (!target) return;
+    selected = selectTodoRef(target);
+    applySelection();
+    ACTIONS.details();
+  },
+  "quick-ack-done"() {
+    const { doneTodos } = ownerActionItems();
+    const cur = resolveSelectedTodo();
+    const target = (cur && doneTodos.some((x) => x.id === cur.id) ? cur : doneTodos[0]) || null;
+    if (!target || !online || target.done_at) return;
+    selected = selectTodoRef(target);
+    applySelection();
+    act(`/api/todo/${target.id}/done`, {});
+  },
   "quick-reply"() {
     const { replyTodos } = ownerActionItems();
     const cur = resolveSelectedTodo();
@@ -2156,7 +2203,7 @@ const ACTIONS = {
 
           <div data-ob-panel="1" class="hidden">
             <ul class="checklist">
-              <li><b>Очередь «Нужно сделать»:</b> показывает только то, где нужно ваше действие («Переслать задание», «Переслать отчёт», «Ответить», «Проверить сдачу»). После пересылки карточка тихо ждёт квитанцию <code>ACK</code> от агента.</li>
+              <li><b>Очередь «Нужно сделать»:</b> таблица явно разделена на <b>Карточка · Проект · Исполнитель · Кому · Тема передачи · Статус · Когда</b>. Если агент работает один в проекте и передавать некому, он оставляет карточку со статусом <b>«выполнено»</b> (адресовано «Владельцу»), которую достаточно прочитать и закрыть кнопкой «Ознакомлен».</li>
               <li><b>Честный учёт во вкладке «Задачи»:</b> у каждой работы один сквозной номер карточки. Копирование текста не означает получение (<code>ACK</code>), а <code>ACK</code> не означает готовность. При возврате на доработку (<code>rework</code>) замечания сами превращаются в новое сообщение исполнителю, а при приёмке (<code>accepted</code>) старые напоминания закрываются автоматически.</li>
               <li><b>Папки и общая почта между ПК:</b>
                 <br>· Агентам на этом ПК (Antigravity, Codex) папки не нужны — они работают напрямую через штатный CLI и MCP.
@@ -2877,13 +2924,20 @@ const ACTIONS = {
     const taskCard = linkedTask ? taskCardNumber(linkedTask) : "";
     const cardLabel = item.display_id || `AD-${item.id}`;
     const head = isTodo
-      ? `${kv("Задача", item.task)}${kv("Кому переслать", item.to)}${kv("Заметка", item.note)}${kv("Результат", item.result)}
-         ${kv("Карточка", cardLabel)}${taskCard && taskCard !== cardLabel ? kv("Карточка задачи", taskCard) : ""}${item.superseded_by ? kv("Версия сообщения", "заменено новым сообщением — копируйте актуальную карточку") : ""}${kv("Доставлено", when(item.delivered_at))}${kv("Переслано", when(item.forwarded_at))}${kv("Получено агентом", when(item.acked_at))}
+      ? `${kv("Карточка", cardLabel)}${taskCard && taskCard !== cardLabel ? kv("Карточка задачи", taskCard) : ""}${kv("Проект", item.project)}${kv("Исполнитель", item.agent)}${kv("Кому", item.kind === "forward" && item.to ? item.to : "Владельцу (пересылка другому агенту не требуется)")}${kv("Тема", item.task)}${kv("Результат", item.result)}${kv("Заметка", item.note)}
+         ${item.superseded_by ? kv("Версия сообщения", "заменено новым сообщением — копируйте актуальную карточку") : ""}${kv("Доставлено", when(item.delivered_at))}${kv("Переслано", when(item.forwarded_at))}${kv("Получено агентом", when(item.acked_at))}
          ${kv("Пришло с компьютера", fromDeviceLabel(item))}${kv("Отправлено на", item.sent_to && `«${item.sent_to.name}», ${when(item.sent_to.at)}${item.sent_to.auto ? " (само)" : ""}`)}${kv("Не отправилось", !item.done_at && item.send_error)}`
       : `${kv("Состояние", stateLabel(item))}${kv("Этап", item.phase)}${kv("Задача", item.task)}${kv("Кому переслать", item.to)}
          ${kv("Заметка", item.note)}${kv("Результат", item.result)}${kv("Устройство", deviceLabel(item.device_id || data.device_id))}${kv("Сессия", sessionLabel(item))}${kv("Обновлено", when(item.updated))}`;
     const hasMsg = isTodo && todoHasCopyableText(item);
-    const msgBlock = hasMsg ? `<h3>Сообщение</h3><div class="msg-body"></div><p class="sub">${item.superseded_by ? "Это сообщение заменено новым: его копирование отключено, чтобы не отправить устаревший текст." : "«Копировать» добавляет заголовок Agent Desk и message_id для квитанции агента."}</p>` : "";
+    const msgHint = item.superseded_by
+      ? "Это сообщение заменено новым: его копирование отключено, чтобы не отправить устаревший текст."
+      : item.kind === "done"
+        ? "Итоговое уведомление для владельца (пересылать другому агенту не нужно). Нажмите «Закрыть», когда ознакомитесь."
+        : item.kind === "forward"
+          ? "«Копировать» добавляет заголовок Agent Desk и message_id для квитанции агента."
+          : "«Копировать» копирует текст сообщения агента в буфер обмена.";
+    const msgBlock = hasMsg ? `<h3>${item.kind === "done" ? "Отчёт о выполнении" : "Сообщение"}</h3><div class="msg-body"></div><p class="sub">${msgHint}</p>` : "";
     const historyBlock = history.length ? `<h3>Последние события</h3><div class="sunken-panel" style="max-height:160px"><table><thead><tr><th>Время</th><th>Событие</th><th>Задача</th></tr></thead><tbody>
       ${history.map((e) => `<tr><td class="nowrap">${hhmm(e.time)}</td><td class="nowrap">${esc(stateLabel(e))}${e.to ? ` → ${esc(e.to)}` : ""}</td><td>${esc(e.task)}</td></tr>`).join("")}
       </tbody></table></div>` : "";

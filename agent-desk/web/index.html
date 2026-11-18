@@ -91,7 +91,7 @@
       <legend id="todo-legend">Нужно сделать</legend>
       <div class="tasks-toolbar queue-toolbar">
         <label for="todo-filter">Показать:</label>
-        <select id="todo-filter"><option value="action">Нужно переслать / ответить</option><option value="waiting">Ждём получения</option><option value="all">Все сообщения</option></select>
+        <select id="todo-filter"><option value="action">Требуют внимания (переслать / отчёт / ответ)</option><option value="waiting">Ждём получения</option><option value="all">Все сообщения</option></select>
         <input type="search" id="todo-search" aria-label="Найти задание во всех проектах" placeholder="Номер, задание, агент или слова из промпта…" autocomplete="off" spellcheck="false">
         <button data-action="clear-todo-search" id="clear-todo-search" hidden>Сбросить поиск</button>
       </div>
@@ -100,7 +100,7 @@
       <p id="copy-status" class="sub" role="status" aria-live="polite"></p>
       <div class="sunken-panel todo-panel">
         <table class="interactive" id="todo-table">
-          <thead><tr><th class="c-ico"></th><th>Задание / сообщение</th><th>Статус</th><th title="Время с появления карточки">Когда</th></tr></thead>
+          <thead><tr><th class="c-ico"></th><th class="c-card">Карточка</th><th class="c-proj">Проект</th><th class="c-from">Исполнитель</th><th class="c-to">Кому</th><th class="c-topic">Тема передачи</th><th class="c-status">Статус</th><th class="c-when" title="Время с появления карточки">Когда</th></tr></thead>
           <tbody></tbody>
         </table>
         <div class="empty" id="todo-empty"><img src="icons/check-0.png" alt="">Нет действий для владельца.</div>

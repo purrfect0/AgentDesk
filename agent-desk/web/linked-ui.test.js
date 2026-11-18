@@ -822,41 +822,41 @@ if (process.argv.includes("--serve")) {
     assert.match(cliWorker, /message_id — глобальный UUID/);
 
     // Update banner + Update dialog (Windows auto-install & Android APK prompt)
-    state.app = { version: "2.4.1" };
+    state.app = { version: "2.4.2" };
     state.update = {
       phase: "available",
       available: true,
-      current_version: "2.4.1",
-      latest_version: "2.4.2",
+      current_version: "2.4.2",
+      latest_version: "9.9.9",
       checked_at: new Date().toISOString(),
-      release_url: "https://github.com/purrfect0/AgentDesk/releases/tag/agent-desk-v2.4.2",
+      release_url: "https://github.com/purrfect0/AgentDesk/releases/tag/agent-desk-v9.9.9",
       notes: "- Автообновление Windows с проверкой SHA-256",
       can_auto_install: true,
-      win: { name: "AgentDesk-Setup-2.4.2.exe", size: 120000000, url: "https://github.com/purrfect0/AgentDesk/releases/download/agent-desk-v2.4.2/AgentDesk-Setup-2.4.2.exe", has_sha256: true },
-      apk: { name: "AgentDesk-2.4.2.apk", size: 27000000, url: "https://github.com/purrfect0/AgentDesk/releases/download/agent-desk-v2.4.2/AgentDesk-Setup-2.4.2.apk", has_sha256: true },
+      win: { name: "AgentDesk-Setup-9.9.9.exe", size: 120000000, url: "https://github.com/purrfect0/AgentDesk/releases/download/agent-desk-v9.9.9/AgentDesk-Setup-9.9.9.exe", has_sha256: true },
+      apk: { name: "AgentDesk-9.9.9.apk", size: 27000000, url: "https://github.com/purrfect0/AgentDesk/releases/download/agent-desk-v9.9.9/AgentDesk-9.9.9.apk", has_sha256: true },
     };
     const hUpd = harness(state);
     hUpd.run("render()");
     assert.equal(hUpd.root.querySelector("#update-banner").classList.contains("hidden"), false);
-    assert.match(hUpd.root.querySelector("#update-banner").innerHTML, /Доступно обновление Agent Desk 2\.4\.2/);
+    assert.match(hUpd.root.querySelector("#update-banner").innerHTML, /Доступно обновление Agent Desk 9\.9\.9/);
 
     hUpd.run("window.abUpdates()");
     const updDlg = hUpd.mounted.at(-1);
     assert.equal(updDlg.title, "Обновление Agent Desk");
-    assert.equal(updDlg.node.querySelector("#upd-primary").textContent, "Скачать и установить 2.4.2");
+    assert.equal(updDlg.node.querySelector("#upd-primary").textContent, "Скачать и установить 9.9.9");
     assert.match(updDlg.node.querySelector("#update-live").innerHTML, /Автообновление Windows/);
 
     hUpd.run('ACTIONS["dismiss-update"]()');
     assert.equal(hUpd.root.querySelector("#update-banner").classList.contains("hidden"), true);
 
-    // Even after PC updates to 2.4.2 (available=false on PC), an older mobile APK still sees APK update!
-    state.app = { version: "2.4.2" };
+    // Even after PC updates to 9.9.9 (available=false on PC), an older mobile APK still sees APK update!
+    state.app = { version: "9.9.9" };
     state.update.available = false;
-    state.update.current_version = "2.4.2";
+    state.update.current_version = "9.9.9";
     const hMob = harness(state);
     hMob.run('AD_HOST.kind = "mobile"; dismissedUpdate = ""; render(); ACTIONS.updates()');
     assert.equal(hMob.root.querySelector("#update-banner").classList.contains("hidden"), false);
-    assert.equal(hMob.mounted.at(-1).node.querySelector("#upd-primary").textContent, "Скачать APK (2.4.2)");
+    assert.equal(hMob.mounted.at(-1).node.querySelector("#upd-primary").textContent, "Скачать APK (9.9.9)");
 
     // Autopilot status bar, auto_relayed_at & rework status labels, and mobile autopilot summary
     state.config.autopilot = { enabled: true, watch_chats: true, codex_cli_enabled: false, max_relays_per_task: 6 };
@@ -881,5 +881,47 @@ if (process.argv.includes("--serve")) {
     assert.equal(obDlg.node.querySelector("#ob-step-indicator").textContent, "Шаг 1 из 4");
     obDlg.node.querySelector("#ob-next").onclick();
     assert.equal(obDlg.node.querySelector("#ob-step-indicator").textContent, "Шаг 2 из 4");
+  });
+
+  test("solo agent completion cards and structured queue columns separate card, project, executor, recipient and topic", () => {
+    const htmlDoc = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
+    const headIdx = ["Карточка", "Проект", "Исполнитель", "Кому", "Тема передачи", "Статус", "Когда"]
+      .map((label) => htmlDoc.indexOf(`>${label}</th>`));
+    for (let i = 0; i < headIdx.length; i++) {
+      assert.ok(headIdx[i] > 0, `missing header column #${i}`);
+      if (i > 0) assert.ok(headIdx[i] > headIdx[i - 1], `header column #${i} out of order`);
+    }
+
+    const state = fixture();
+    const now = new Date().toISOString();
+    state.todos = [
+      { id: 418, display_id: "AD-418", message_id: "dddddddd-4444-4444-8444-444444444444", project: "SSJC", agent: "Carbon", to: "", kind: "done", task: "SSJC C01 — закрытие находок код-ревью", result: "Релиз опубликован", message: "Задача выполнена полностью.", created: now },
+      { id: 405, display_id: "AD-405", message_id: "eeeeeeee-5555-4555-8555-555555555555", project: "Agent Desk", agent: "Carbon", to: "Codex", kind: "forward", task: "Ревью 2.4.2", message: "Проверь патч.", created: now },
+    ];
+    const h = harness(state);
+    h.run('project = "*"; todoFilter = "action"; render()');
+    const tbody = h.root.querySelector("#todo-table tbody").innerHTML;
+
+    // Verify exact cell order inside AD-418 row: card -> project -> executor -> recipient ("Владельцу") -> topic -> status ("выполнено")
+    const r418 = tbody.split('<tr ')[1];
+    assert.match(r418, /data-label="Карточка"><code class="card-id">AD-418<\/code><\/td>/);
+    assert.match(r418, /data-label="Проект"><b>SSJC<\/b><\/td>/);
+    assert.match(r418, /data-label="Исполнитель"><b>Carbon<\/b><\/td>/);
+    assert.match(r418, /data-label="Кому"><span class="sub">Владельцу<\/span><\/td>/);
+    assert.match(r418, /data-label="Тема"><b>SSJC C01 — закрытие находок код-ревью<\/b><br><span class="sub">Итог: Релиз опубликован<\/span><\/td>/);
+    assert.match(r418, /class="status" data-label="Статус"><b>выполнено<\/b>/);
+    assert.doesNotMatch(r418, /не переслано/);
+
+    // Contextual owner action buttons include `quick-open-done` and `quick-ack-done`
+    const actionsHtml = h.root.querySelector("#owner-actions").innerHTML;
+    assert.match(actionsHtml, /data-action="quick-open-done"/);
+    assert.match(actionsHtml, /data-action="quick-ack-done"/);
+
+    // Opening details on solo `done` card shows clean owner report without `mark-forwarded`
+    h.run('ACTIONS["quick-open-done"]()');
+    const detHtml = h.mounted.at(-1).html;
+    assert.match(detHtml, /Отчёт о выполнении/);
+    assert.match(detHtml, /пересылка другому агенту не требуется/);
+    assert.doesNotMatch(detHtml, /data-action="mark-forwarded"/);
   });
 }

@@ -51,6 +51,16 @@ const MARKER_TEMPLATES = Object.freeze({
     message: "Краткий готовый отчёт для пересылки ведущему/ревьюеру",
     result: "docs/report.md",
   },
+  solo_done: {
+    project: "<Project>",
+    agent: "<Agent>",
+    session_id: "<session-id>",
+    seq: 2,
+    state: "done",
+    task: "<Краткое название задачи>",
+    message: "Итоговый отчёт для владельца (пересылать другому агенту не нужно)",
+    result: "Готово, тесты пройдены",
+  },
   owner_question: {
     project: "<Project>",
     agent: "<Agent>",

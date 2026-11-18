@@ -195,11 +195,19 @@ b.to { font-weight: bold; }
 .quiet-grid input[type=time] { width: auto; }
 #copy-status { margin: 4px 0; min-height: 1em; }
 #todo-search-hint { margin: 4px 0; }
-#todo-table { table-layout: fixed; }
-#todo-table th:nth-child(3) { width: 145px; }
-#todo-table th:last-child { width: 100px; }
-#todo-table td { vertical-align: top; padding-top: 3px; padding-bottom: 3px; overflow-wrap: anywhere; white-space: normal; }
-#todo-table td.todo-age { white-space: nowrap; }
+#todo-table { table-layout: auto; width: 100%; }
+#todo-table th.c-card, #todo-table td.c-card { width: 66px; white-space: nowrap; }
+#todo-table th.c-proj, #todo-table td.c-proj { width: 92px; }
+#todo-table th.c-from, #todo-table td.c-from { width: 100px; }
+#todo-table th.c-to, #todo-table td.c-to { width: 104px; }
+#todo-table th.c-topic, #todo-table td.c-topic { min-width: 180px; }
+#todo-table th.c-status, #todo-table td.status { width: 132px; }
+#todo-table th.c-when, #todo-table td.todo-age { width: 82px; white-space: nowrap; }
+#todo-table td { vertical-align: top; padding: 4px 6px; overflow-wrap: anywhere; white-space: normal; border-bottom: 1px solid #ececec; border-right: 1px solid #f0f0f0; }
+#todo-table td.c-ico { border-right: 0; padding-right: 2px !important; }
+#todo-table td:last-child { border-right: 0; }
+#todo-table tr.highlighted td { border-color: rgba(255, 255, 255, 0.2); }
+#todo-table td.c-card .card-id { margin-right: 0; }
 #todo-table tr[data-todo] { user-select: none; }
 #task-prompt, #manual-copy { min-height: 130px; white-space: pre-wrap; }
 #manual-copy { width: 100%; min-height: 240px; }
@@ -356,12 +364,39 @@ table.interactive > tbody > tr.highlighted td .peer-note .bad { color: #ffd0d0; 
 .mail-root-row { margin: var(--ad-gap) 0; }
 button:focus-visible, [role=tab]:focus-visible, summary:focus-visible { outline: 1px dotted var(--ad-ink); outline-offset: -4px; }
 body.mobile [data-action="mail-roots"] { display: none !important; }
+@media (max-width: 680px) {
+  #todo-table thead { display: none; }
+  #todo-table, #todo-table tbody { display: block; width: 100%; }
+  #todo-table tr[data-todo] {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px 8px;
+    padding: 6px;
+    border-bottom: 1px solid #808080;
+  }
+  #todo-table td { border: 0; padding: 1px 0; width: auto !important; min-width: 0 !important; }
+  #todo-table td.c-ico { display: none; }
+  #todo-table td.c-card { grid-column: 1; }
+  #todo-table td.todo-age { grid-column: 2; text-align: right; }
+  #todo-table td.c-proj::before,
+  #todo-table td.c-from::before,
+  #todo-table td.c-to::before,
+  #todo-table td.c-topic::before,
+  #todo-table td.status::before {
+    content: attr(data-label) ": ";
+    color: #555;
+    font-weight: normal;
+  }
+  #todo-table tr.highlighted td::before { color: #ddd; }
+  #todo-table td.c-proj { grid-column: 1 / -1; }
+  #todo-table td.c-from { grid-column: 1; }
+  #todo-table td.c-to { grid-column: 2; }
+  #todo-table td.c-topic { grid-column: 1 / -1; margin-top: 2px; }
+  #todo-table td.status { grid-column: 1 / -1; }
+}
+
 @media (max-width: 520px) {
   .assignment-grid { grid-template-columns: 1fr; }
-  #todo-table th { white-space: normal; overflow-wrap: anywhere; vertical-align: bottom; }
-  #todo-table th:nth-child(3) { width: 90px; }
-  #todo-table th:last-child { width: 80px; }
-  #todo-table th:first-child, #todo-table td:first-child { display: none; }
   .task-meta { grid-template-columns: 1fr; }
   .task-meta dd { margin-bottom: 4px; }
   .dialog .kv { grid-template-columns: 1fr; }
@@ -379,12 +414,12 @@ body.mobile [data-action="mail-roots"] { display: none !important; }
   button.tool { min-width: 40px; }
   button.tool span { display: none; }
   .project-window > .window-body { overflow-y: auto; }
-  .todo-panel { height: auto; max-height: 28vh; }
+  .todo-panel { height: auto; max-height: 32vh; }
   .tab-window { flex: 1 0 220px; }
   .status-bar { flex-wrap: wrap; }
   td.task { max-width: 160px; }
   table, .menubar, .status-bar-field, .dialog { font-size: 13px; }
-  #todo-table td:nth-child(2), #agent-table td.state { white-space: normal; }
+  #agent-table td.state { white-space: normal; }
   .peer-row { flex-wrap: wrap; }
   body { font-size: 12px; }
 }

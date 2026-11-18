@@ -9,7 +9,7 @@ text{font-family:W98,Tahoma,"MS Sans Serif",sans-serif;font-size:11px}</style><r
 <rect x="2" y="2" width="836" height="20" fill="#c0c0c0"/><defs><linearGradient id="b10" x1="0" x2="1"><stop offset="0" stop-color="#000080"/><stop offset="1" stop-color="#1084d0"/></linearGradient></defs>
 <rect x="3" y="3" width="834" height="18" fill="url(#b10)"/>
 <image href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQAgMAAABinRfyAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAADFBMVEUAAAAAAAAAgAD///+EsaEWAAAAAXRSTlMAQObYZgAAAAFiS0dEAxEMTPIAAAAHdElNRQfiBBMBIzZQpcZXAAAAOElEQVQI12NgQADRAAYGxqylDAxsq1Y5AIl9DgxSq/ZNABK/YMTvV0BiP5BgWw9WAiTAOsB6QQAACqEU/HIVF3cAAAAldEVYdGRhdGU6Y3JlYXRlADIwMTgtMDQtMTlUMDE6MzU6NTQtMDQ6MDA3RptNAAAAJXRFWHRkYXRlOm1vZGlmeQAyMDE4LTA0LTE5VDAxOjM1OjU0LTA0OjAwRhsj8QAAAABJRU5ErkJggg==" x="6" y="4" width="16" height="16" style="image-rendering:pixelated"/>
-<text x="26" y="16" fill="#fff" font-weight="bold">Что нового в 2.4.1</text>
+<text x="26" y="16" fill="#fff" font-weight="bold">Что нового в 2.4.2</text>
 <rect x="783" y="5" width="16" height="14" fill="#0a0a0a"/>
 <rect x="783" y="5" width="15" height="13" fill="#dfdfdf"/>
 <rect x="784" y="6" width="14" height="12" fill="#808080"/>

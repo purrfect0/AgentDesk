@@ -426,6 +426,57 @@ test("PC <-> laptop: pair with a code, send reminders, auto-send to the desk of 
   }
 });
 
+test("solo agent completion without `to` (or with `to` = owner/self) leaves a clean `done` card for the owner", () => {
+  const { desk, put } = makeDesk();
+  const alerts = [];
+  desk.on("alert", (a) => alerts.push(a));
+
+  // 1. Solo agent finishes task without `to` -> creates `kind: "done"` card, no ACK footer, no unknown-addressee warning
+  put({ agent: "Carbon", state: "done", task: "Соло-релиз 2.4.2", result: "Тесты пройдены", message: "Всё собрано и проверено." });
+  desk.scanOnce();
+  assert.equal(open(desk).length, 1);
+  const t1 = open(desk)[0];
+  assert.equal(t1.kind, "done");
+  assert.equal(t1.to, "");
+  assert.equal(t1.warning, undefined);
+  assert.equal(forwardText(t1), "Всё собрано и проверено.");
+  assert.doesNotMatch(forwardText(t1), /ack/i);
+  assert.ok(alerts.some((a) => a.kind === "done" && a.todo === t1.id && /выполнил задачу/.test(a.title)));
+
+  // 2. Agent going idle or starting another task does NOT wipe out the unread completion card
+  put({ agent: "Carbon", state: "idle", task: "" });
+  desk.scanOnce();
+  assert.equal(open(desk).length, 1);
+
+  // 3. Agent accidentally writing `to: "Владелец"` or `to: "Carbon"` (self) normalizes to `kind: "done"` (`to: ""`)
+  put({ agent: "Carbon", state: "done", to: "Владелец", task: "Задача для владельца", message: "Отчёт 1" });
+  put({ agent: "Carbon", state: "done", to: "Carbon", task: "Сам себе", message: "Отчёт 2" });
+  desk.scanOnce();
+  const kinds = open(desk).map((t) => ({ task: t.task, kind: t.kind, to: t.to, warn: t.warning }));
+  assert.deepEqual(kinds, [
+    { task: "Соло-релиз 2.4.2", kind: "done", to: "", warn: undefined },
+    { task: "Задача для владельца", kind: "done", to: "", warn: undefined },
+    { task: "Сам себе", kind: "done", to: "", warn: undefined },
+  ]);
+
+  // 4. Legacy open `forward` cards in state.json addressed to "Владелец" or self migrate to `kind: "done"` on reload
+  const legacyDir = tmp();
+  fs.writeFileSync(path.join(legacyDir, "state.json"), JSON.stringify({
+    todos: [
+      { id: 407, display_id: "AD-407", kind: "forward", project: "Agent Desk", agent: "Carbon", to: "Владелец", task: "Старая карточка 1", message: "m1", warning: "Адресат «Владелец» не знаком", created: new Date().toISOString() },
+      { id: 418, display_id: "AD-418", kind: "forward", project: "SSJC", agent: "Carbon", to: "Carbon", task: "Старая карточка 2", message: "m2", created: new Date().toISOString() },
+    ],
+  }));
+  const reloaded = new Desk({ dataDir: legacyDir, legacyDir: null, port: 0, log: () => {} });
+  assert.deepEqual(
+    reloaded.state.todos.map((t) => ({ id: t.id, kind: t.kind, to: t.to, warning: t.warning })),
+    [
+      { id: 407, kind: "done", to: "", warning: undefined },
+      { id: 418, kind: "done", to: "", warning: undefined },
+    ],
+  );
+});
+
 test("the Windows build packs every file the core loads, the versions agree", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "package.json"), "utf8"));
   const local = ["desk.js", "peers.js"].flatMap((f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8")
