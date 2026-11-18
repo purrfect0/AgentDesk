@@ -820,5 +820,42 @@ if (process.argv.includes("--serve")) {
     const cliWorker = hEmpty.run('agentPrompt({ project: "Demo", path: "" })');
     assert.match(cliWorker, /agent_desk_submit/);
     assert.match(cliWorker, /message_id — глобальный UUID/);
+
+    // Update banner + Update dialog (Windows auto-install & Android APK prompt)
+    state.app = { version: "2.3.6" };
+    state.update = {
+      phase: "available",
+      available: true,
+      current_version: "2.3.6",
+      latest_version: "2.3.7",
+      checked_at: new Date().toISOString(),
+      release_url: "https://github.com/purrfect0/AgentDesk/releases/tag/agent-desk-v2.3.7",
+      notes: "- Автообновление Windows с проверкой SHA-256",
+      can_auto_install: true,
+      win: { name: "AgentDesk-Setup-2.3.7.exe", size: 120000000, url: "https://github.com/purrfect0/AgentDesk/releases/download/agent-desk-v2.3.7/AgentDesk-Setup-2.3.7.exe", has_sha256: true },
+      apk: { name: "AgentDesk-2.3.7.apk", size: 27000000, url: "https://github.com/purrfect0/AgentDesk/releases/download/agent-desk-v2.3.7/AgentDesk-2.3.7.apk", has_sha256: true },
+    };
+    const hUpd = harness(state);
+    hUpd.run("render()");
+    assert.equal(hUpd.root.querySelector("#update-banner").classList.contains("hidden"), false);
+    assert.match(hUpd.root.querySelector("#update-banner").innerHTML, /Доступно обновление Agent Desk 2\.3\.7/);
+
+    hUpd.run("window.abUpdates()");
+    const updDlg = hUpd.mounted.at(-1);
+    assert.equal(updDlg.title, "Обновление Agent Desk");
+    assert.equal(updDlg.node.querySelector("#upd-primary").textContent, "Скачать и установить 2.3.7");
+    assert.match(updDlg.node.querySelector("#update-live").innerHTML, /Автообновление Windows/);
+
+    hUpd.run('ACTIONS["dismiss-update"]()');
+    assert.equal(hUpd.root.querySelector("#update-banner").classList.contains("hidden"), true);
+
+    // Even after PC updates to 2.3.7 (available=false on PC), an older mobile APK still sees APK update!
+    state.app = { version: "2.3.7" };
+    state.update.available = false;
+    state.update.current_version = "2.3.7";
+    const hMob = harness(state);
+    hMob.run('AD_HOST.kind = "mobile"; dismissedUpdate = ""; render(); ACTIONS.updates()');
+    assert.equal(hMob.root.querySelector("#update-banner").classList.contains("hidden"), false);
+    assert.equal(hMob.mounted.at(-1).node.querySelector("#upd-primary").textContent, "Скачать APK (2.3.7)");
   });
 }

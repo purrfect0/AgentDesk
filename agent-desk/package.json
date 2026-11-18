@@ -1,7 +1,7 @@
 {
   "name": "agent-desk",
   "productName": "Agent Desk",
-  "version": "2.3.5",
+  "version": "2.3.6",
   "description": "Кто из ИИ-агентов работает, кто ждёт ответа и что нужно переслать",
   "author": "jayleywesa",
   "license": "MIT",
@@ -35,6 +35,7 @@
       "core/sync.js",
       "core/tasks.js",
       "core/adapters.js",
+      "core/updater.js",
       "core/marker-schema.js",
       "core/mail.js",
       "core/agent-client.js",

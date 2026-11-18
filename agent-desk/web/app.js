@@ -58,7 +58,86 @@ let seenAlerts = null;
 let online = true;
 let lastUpdated = null;
 let dialogReturnFocus = null;
+const CLIENT_VERSION = "2.3.6";
 let phoneNotify = localStorage.getItem("ad.phoneNotify") !== "0";
+let dismissedUpdate = localStorage.getItem("ad.dismissUpdate") || "";
+
+function compareVer(a, b) {
+  const pa = String(a || "").trim().replace(/^agent-desk-v/i, "").replace(/^v/i, "").split(".").map(Number);
+  const pb = String(b || "").trim().replace(/^agent-desk-v/i, "").replace(/^v/i, "").split(".").map(Number);
+  if (pa.length < 3 || pb.length < 3 || pa.slice(0, 3).some(Number.isNaN) || pb.slice(0, 3).some(Number.isNaN)) return 0;
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] > pb[i]) return 1;
+    if (pa[i] < pb[i]) return -1;
+  }
+  return 0;
+}
+
+function updateTargetVersion() {
+  const upd = data?.update;
+  if (AD_HOST.kind === "mobile") {
+    const best = compareVer(upd?.latest_version, data?.app?.version) >= 0 ? upd?.latest_version : data?.app?.version;
+    return compareVer(best, CLIENT_VERSION) > 0 ? best : "";
+  }
+  return upd?.available && upd?.latest_version ? upd.latest_version : "";
+}
+
+function formatMb(bytes) {
+  const n = Number(bytes) || 0;
+  return n > 0 ? `${(n / (1024 * 1024)).toFixed(1)} МБ` : "";
+}
+
+function renderUpdateBanner() {
+  const box = $("#update-banner");
+  if (!box || !data) return;
+  const ver = updateTargetVersion();
+  const show = Boolean(ver && dismissedUpdate !== ver);
+  box.classList.toggle("hidden", !show);
+  patch(box, show
+    ? `<img src="${icon("world-1")}" alt=""><span><b>Доступно обновление Agent Desk ${esc(ver)}</b>${AD_HOST.kind === "mobile" ? ` (на телефоне ${esc(CLIENT_VERSION)})` : ""}</span><button type="button" data-action="updates">Обновить…</button><button type="button" data-action="dismiss-update">Скрыть</button>`
+    : "");
+}
+
+function updateLiveMarkup() {
+  const upd = data?.update || {};
+  const isPhone = AD_HOST.kind === "mobile";
+  const targetVer = updateTargetVersion();
+  const curVer = isPhone
+    ? `${CLIENT_VERSION} (телефон)${data?.app?.version ? ` · ${data.app.version} (ПК)` : ""}`
+    : (data?.app?.version || CLIENT_VERSION);
+  const latestLabel = upd.latest_version
+    ? `${esc(upd.latest_version)} ${targetVer ? '<b class="ok">(доступно обновление)</b>' : '<span class="ok">(установлена актуальная версия ✓)</span>'}`
+    : (targetVer ? `${esc(targetVer)} <b class="ok">(доступно обновление для телефона)</b>` : '<span class="sub">ещё не проверялась</span>');
+  let statusLine = "";
+  if (upd.phase === "checking") {
+    statusLine = "Проверяю последний релиз на GitHub…";
+  } else if (upd.phase === "downloading" && !isPhone) {
+    const pct = Math.max(0, Math.min(100, Number(upd.progress?.percent) || 0));
+    const dl = formatMb(upd.progress?.downloaded);
+    const tot = formatMb(upd.progress?.total);
+    statusLine = `Скачиваю установщик и сверяю SHA-256: <b>${pct}%</b>${dl && tot ? ` (${dl} из ${tot})` : ""}
+      <div class="progress-indicator segmented update-progress"><span class="progress-indicator-bar" style="width:${pct}%"></span></div>`;
+  } else if (upd.phase === "ready" && !isPhone) {
+    statusLine = `<span class="ok"><b>Установщик скачан и проверен по SHA-256 ✓</b></span>${upd.verified_sha256 ? `<br><code class="sub">${esc(upd.verified_sha256)}</code>` : ""}`;
+  } else if (upd.phase === "installing" && !isPhone) {
+    statusLine = "<b>Запускаю тихое обновление — Agent Desk сейчас закроется и перезапустится сам…</b>";
+  } else if (upd.error) {
+    statusLine = `<span class="bad">${esc(upd.error)}</span>`;
+  } else if (upd.checked_at) {
+    statusLine = `<span class="sub">Проверено: ${hhmm(upd.checked_at)} · ${esc(ago(upd.checked_at))}</span>`;
+  }
+  const notesBlock = upd.notes
+    ? `<h3>Что нового в ${esc(upd.latest_version || "релизе")}</h3><div class="msg-body update-notes">${esc(upd.notes)}</div>`
+    : "";
+  const phoneHint = isPhone && targetVer
+    ? '<p class="sub">Нажмите «Скачать APK»: браузер загрузит пакет с GitHub, после чего откройте файл в уведомлениях Android для обновления поверх текущей версии (если Android сообщит о разной подписи отладочной сборки — удалите старую версию перед установкой новой).</p>'
+    : "";
+  return `<dl class="kv" data-key="upd-kv">
+    <dt>Текущая версия</dt><dd>${esc(curVer)}</dd>
+    <dt>Последний релиз</dt><dd>${latestLabel}</dd>
+    ${statusLine ? `<dt>Состояние</dt><dd>${statusLine}</dd>` : ""}
+  </dl>${notesBlock}${phoneHint}`;
+}
 let todoFilter = "action";
 let todoSearch = "";
 let todoMenuId = null;
@@ -259,6 +338,7 @@ function grouped(items, cols, row) {
 
 function render() {
   if (!data) return;
+  renderUpdateBanner();
   const projects = allProjects();
   if (project !== "*" && !projects.includes(project)) project = "*";
   const openIn = (p) => data.todos.filter((t) => needsAction(t) && (p === "*" || t.project === p)).length;
@@ -352,6 +432,8 @@ function render() {
   $("#popup-sound-check").classList.toggle("on", data.config.popup_sound !== false);
   const live = document.querySelector("#peers-live"); // the "Другие компьютеры" dialog is open
   if (live) patch(live, peersLive(live.dataset.pair === "1"));
+  const updLive = document.querySelector("#update-live");
+  if (updLive?.dataset?.open === "1") patch(updLive, updateLiveMarkup());
   applySelection();
 }
 
@@ -1221,7 +1303,10 @@ function phoneToasts() {
       <div><b>${esc(a.title)}</b>${a.action ? `<p>${esc(a.action)}</p>` : ""}${a.body ? `<p class="sub">${esc(a.body)}</p>` : ""}</div></div>`;
     el.addEventListener("click", (e) => {
       el.remove();
-      if (!e.target.closest("[data-toast-close]")) window.abFocus(a.project, Number.isInteger(a.todo) ? a.todo : null);
+      if (!e.target.closest("[data-toast-close]")) {
+        if (a.kind === "update") ACTIONS.updates();
+        else window.abFocus(a.project, Number.isInteger(a.todo) ? a.todo : null);
+      }
     });
     box.prepend(el);
     setTimeout(() => el.remove(), 20000);
@@ -2008,11 +2093,145 @@ const ACTIONS = {
     catch (error) { $("#mail-sync").textContent = `Не удалось обновить список: ${error.message}. Показаны последние данные.`; }
     finally { if (btn) btn.disabled = !online; }
   },
+  "dismiss-update"() {
+    const ver = updateTargetVersion();
+    if (ver) {
+      dismissedUpdate = ver;
+      try { localStorage.setItem("ad.dismissUpdate", ver); } catch { /* ignore */ }
+    }
+    renderUpdateBanner();
+  },
+  updates() {
+    if (!data) return;
+    if (document.querySelector("#update-live")?.dataset?.open === "1") return;
+    const isPhone = AD_HOST.kind === "mobile";
+    const canAdmin = isLocal && !isPhone;
+    const autoChecked = data.config?.update_check !== false;
+    dialog("Обновление Agent Desk", `<div class="msg"><img src="${icon("world-0")}" alt=""><div style="flex:1;min-width:0">
+      <div id="update-live" data-open="1">${updateLiveMarkup()}</div>
+      ${canAdmin ? `<div class="field-row" style="margin-top:8px"><input type="checkbox" id="update-auto-check"${autoChecked ? " checked" : ""}><label for="update-auto-check">Автоматически проверять выход новых версий и показывать уведомление</label></div>` : ""}
+      </div></div>
+      <div class="buttons wrap">
+        <button id="upd-primary" class="default hidden"></button>
+        <button id="upd-check">Проверить сейчас</button>
+        <button id="upd-page">Страница GitHub</button>
+        <button data-close>Закрыть</button>
+      </div>`,
+    (node) => {
+      const liveEl = node.querySelector("#update-live");
+      const btnPrimary = node.querySelector("#upd-primary");
+      const btnCheck = node.querySelector("#upd-check");
+      const btnPage = node.querySelector("#upd-page");
+      const autoBox = node.querySelector("#update-auto-check");
+      let watchTimer = null;
+
+      const openUrl = (url) => {
+        const target = url || data?.update?.release_url || "https://github.com/purrfect0/AgentDesk/releases/latest";
+        if (typeof AD_HOST.openExternal === "function") AD_HOST.openExternal(target);
+        else window.open(target, "_blank", "noopener,noreferrer");
+      };
+
+      const syncUi = () => {
+        if (!node.isConnected) { clearInterval(watchTimer); return; }
+        patch(liveEl, updateLiveMarkup());
+        renderUpdateBanner();
+        const upd = data?.update || {};
+        const busy = upd.phase === "checking" || upd.phase === "downloading" || upd.phase === "installing";
+        btnCheck.disabled = !online || busy;
+        const targetVer = updateTargetVersion();
+
+        if (isPhone) {
+          const apkUrl = upd.apk?.url || (targetVer ? `https://github.com/purrfect0/AgentDesk/releases/download/agent-desk-v${targetVer}/AgentDesk-${targetVer}.apk` : "");
+          btnPrimary.classList.toggle("hidden", !targetVer);
+          btnPrimary.disabled = false;
+          btnPrimary.textContent = targetVer ? `Скачать APK (${targetVer})` : "";
+          btnPrimary.onclick = () => openUrl(apkUrl || upd.release_url);
+        } else if (canAdmin && upd.available) {
+          btnPrimary.classList.remove("hidden");
+          btnPrimary.disabled = !online || busy;
+          if (upd.phase === "ready" && upd.can_auto_install) {
+            btnPrimary.textContent = `Установить ${upd.latest_version} и перезапустить`;
+            btnPrimary.onclick = async () => {
+              btnPrimary.disabled = true;
+              try {
+                data.update = await api("/api/update/install", {});
+                syncUi();
+              } catch (e) {
+                alertBox("Обновление", e.message, "msg_error-0");
+                await refreshUpdate();
+              }
+            };
+          } else if (upd.can_auto_install && upd.win?.has_sha256) {
+            btnPrimary.textContent = upd.phase === "downloading"
+              ? `Скачивание… ${upd.progress?.percent ?? 0}%`
+              : `Скачать и установить ${upd.latest_version}`;
+            btnPrimary.onclick = async () => {
+              btnPrimary.disabled = true;
+              try {
+                data.update = await api("/api/update/download", { auto_install: true });
+                ensureFastPoll();
+                syncUi();
+              } catch (e) {
+                alertBox("Обновление", e.message, "msg_error-0");
+                await refreshUpdate();
+              }
+            };
+          } else {
+            btnPrimary.textContent = `Скачать установщик (${upd.latest_version})`;
+            btnPrimary.onclick = () => openUrl(upd.win?.url || upd.release_url);
+          }
+        } else {
+          btnPrimary.classList.add("hidden");
+        }
+      };
+
+      const refreshUpdate = async () => {
+        try {
+          data.update = await api("/api/update");
+          syncUi();
+          if (!["checking", "downloading"].includes(data.update?.phase) && watchTimer) {
+            clearInterval(watchTimer);
+            watchTimer = null;
+          }
+        } catch { /* ignore transient poll error */ }
+      };
+
+      const ensureFastPoll = () => {
+        if (watchTimer) return;
+        watchTimer = setInterval(() => {
+          if (!node.isConnected) { clearInterval(watchTimer); watchTimer = null; return; }
+          refreshUpdate();
+        }, 600);
+      };
+
+      btnCheck.onclick = async () => {
+        btnCheck.disabled = true;
+        try {
+          data.update = await api("/api/update/check", {});
+          syncUi();
+        } catch (e) {
+          alertBox("Проверка обновлений", e.message, "msg_warning-2");
+          btnCheck.disabled = false;
+        }
+      };
+      btnPage.onclick = () => openUrl(data?.update?.release_url);
+      if (autoBox) {
+        autoBox.onchange = () => act("/api/config", { update_check: autoBox.checked });
+      }
+
+      syncUi();
+      if (["checking", "downloading"].includes(data?.update?.phase)) ensureFastPoll();
+      else if (online && !data?.update?.checked_at) btnCheck.click();
+    }, { wide: true });
+  },
   about() {
     dialog("О программе", `<div class="msg"><img src="${icon("network_normal_two_pcs-0")}" alt="">
-      <div><b>Agent Desk ${esc(data.app?.version || "")}</b><br>Кто из агентов работает, кто ждёт ответа и что нужно переслать.<br><br>
-      Агенты появляются сами после первого маркера. Папки: ${esc(markerFolders().join("; "))}</div></div>
-      <div class="buttons"><button data-close>OK</button></div>`);
+      <div><b>Agent Desk ${esc(data.app?.version || CLIENT_VERSION)}</b><br>Кто из агентов работает, кто ждёт ответа и что нужно переслать.<br><br>
+      Агенты появляются сами после первого маркера или подключения CLI/MCP. Папки: ${esc(markerFolders().join("; ") || "не заданы (CLI/MCP)")}</div></div>
+      <div class="buttons"><button id="about-updates">Проверить обновления…</button><button data-close class="default">OK</button></div>`,
+    (node, close) => {
+      node.querySelector("#about-updates").onclick = () => { close(); ACTIONS.updates(); };
+    });
   },
   howto() {
     const targets = howtoTargets();
@@ -2583,6 +2802,7 @@ window.abFocus = (proj, todoId) => {
 window.abPeers = () => { if (data && !document.querySelector("#peers-live")) ACTIONS.peers(); };
 window.abNotifySettings = () => { if (data) notifySettingsDialog(); };
 window.abDiagnostics = () => { if (data) diagnosticsDialog(); };
+window.abUpdates = () => { if (data) ACTIONS.updates(); };
 
 // --- desktop app window (Electron: desktop/preload.js gives window.agentDesk) -----
 

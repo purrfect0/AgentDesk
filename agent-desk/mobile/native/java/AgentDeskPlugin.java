@@ -95,6 +95,17 @@ public class AgentDeskPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void openExternal(PluginCall call) {
+        String url = call.getString("url", "");
+        if (url == null || !url.startsWith("https://github.com/purrfect0/AgentDesk")) {
+            call.reject("Неразрешённый адрес");
+            return;
+        }
+        open(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        call.resolve();
+    }
+
+    @PluginMethod
     public void openNotificationSettings(PluginCall call) {
         Context ctx = getContext();
         Intent i = Build.VERSION.SDK_INT >= 26

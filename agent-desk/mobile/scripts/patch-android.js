@@ -21,7 +21,9 @@ const manifestFile = path.join(APP, "src", "main", "AndroidManifest.xml");
 const gradleFile = path.join(APP, "build.gradle");
 const version = require("../package.json").version;
 const { appId } = require("../capacitor.config.json");
-const code = Number(process.env.VERSION_CODE || process.env.GITHUB_RUN_NUMBER || 1);
+const vParts = String(version).split(".").map(Number);
+const semverCode = (vParts[0] || 0) * 1000000 + (vParts[1] || 0) * 10000 + (vParts[2] || 0) * 100 + ((Number(process.env.GITHUB_RUN_NUMBER) || 0) % 100);
+const code = Number(process.env.VERSION_CODE) || semverCode || 1;
 
 if (!fs.existsSync(manifestFile)) {
   console.error("Нет android/: сначала выполните \"npx cap add android\".");

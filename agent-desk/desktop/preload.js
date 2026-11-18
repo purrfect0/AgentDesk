@@ -14,5 +14,6 @@ contextBridge.exposeInMainWorld("agentDesk", {
   popup: (what) => ipcRenderer.send("popup", ["open", "gone"].includes(what) ? what : "close"),
   onPopupLeave: (cb) => ipcRenderer.on("popup-leave", () => cb()),
   qr: (text) => ipcRenderer.invoke("qr", String(text)),
+  openExternal: (url) => ipcRenderer.invoke("open-external", String(url)),
   onMaximized: (cb) => ipcRenderer.on("maximized", (_e, value) => cb(!!value)),
 });

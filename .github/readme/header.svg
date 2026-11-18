@@ -27,8 +27,8 @@ text{font-family:W98,Tahoma,"MS Sans Serif",sans-serif;font-size:11px}</style><r
 <rect x="818" y="6" width="13" height="11" fill="#fff"/>
 <rect x="819" y="7" width="12" height="10" fill="#c0c0c0"/><path d="M821 9l7 7M828 9l-7 7" stroke="#000" stroke-width="1.6" shape-rendering="auto"/>
 <image href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgBAMAAACBVGfHAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAAJ1BMVEUAAACAgIDAwMAAAAD///8AAIAAAP8A//8AgIAA/wAAgACAgAD//wCGJawVAAAAAXRSTlMAQObYZgAAAAFiS0dEBI9o2VEAAAAHdElNRQfiBhoALCQijt0NAAAA1klEQVQoz4WRPQ7CMAyFU3GBpik7SSeYGiykrol6BY5AuAJH6MzGysjcrUfopXDipD8w9EmRok/284vDGOMklpSpIFknULZBfAahwS6AAIDLCjjnbitw3wRuC+yvKENx8ylYQXkFgnCVFNd44HOBDi2lRJBRs/E4ALIwpum6jkCw4KZ5JHB8KlXpBTi9fcncEhc4gx38jMXBFR4KtgBx0zpPAEi8iiBa80KwnA+D5m07ve6g+vEsrXfACnStoR9B2xcC9AhjAOrMfuIYEf83mU6bhST2py8320Yl9JQprQAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAxOC0wNi0yNlQwMDo0NDozNi0wNDowMNQdHpQAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMTgtMDYtMjZUMDA6NDQ6MzYtMDQ6MDClQKYoAAAAAElFTkSuQmCC" x="20" y="40" width="64" height="64" style="image-rendering:pixelated"/>
-<text x="104" y="58" font-weight="bold" style="font-size:22px">Agent Desk 2.3.5</text>
+<text x="104" y="58" font-weight="bold" style="font-size:22px">Agent Desk 2.3.6</text>
 <text x="104" y="80" style="font-size:13px">Единое табло ИИ-агентов: задачи, контекст в один клик, пересылки и контроль сдачи.</text>
 <text x="104" y="100" style="font-size:13px" fill="#404040">Windows (.exe) · Android (.apk) · Связь ПК по Wi-Fi · Штатные CLI и MCP · MIT</text>
 <rect x="6" y="106" width="828" height="16" fill="#808080"/><rect x="7" y="107" width="827" height="15" fill="#fff"/><rect x="7" y="107" width="826" height="14" fill="#c0c0c0"/>
-<text x="12" y="118">Версия 2.3.5 · Windows 10/11 и Android 6+ · Готово к работе</text></svg>
+<text x="12" y="118">Версия 2.3.6 · Windows 10/11 и Android 6+ · Готово к работе</text></svg>

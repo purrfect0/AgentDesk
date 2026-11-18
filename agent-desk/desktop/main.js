@@ -2,6 +2,7 @@
 // Agent Desk for Windows: the board core (core/desk.js) runs inside the app; the window, tray
 // icon and Win98-style popups are Electron. Installed by the NSIS setup (npm run dist:win).
 const { app, BrowserWindow, Tray, Menu, ipcMain, screen, dialog, shell, nativeImage } = require("electron");
+const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const { Desk } = require("../core/desk.js");
@@ -38,7 +39,18 @@ const ours = (url) => typeof url === "string" && desk && url.startsWith(base());
 
 async function boot() {
   Menu.setApplicationMenu(null);
-  desk = new Desk({ webDir: WEB, discovery: true }); // discovery: Agent Desks of the Wi-Fi find each other (core/peers.js)
+  desk = new Desk({ webDir: WEB, discovery: true, updateChecks: true }); // discovery: Agent Desks of the Wi-Fi find each other (core/peers.js)
+  if (process.platform === "win32" && app.isPackaged) {
+    desk.updater.setInstallHandler(async ({ path: installerPath }) => {
+      const child = spawn(installerPath, ["/S", "--updated", "--force-run"], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: false,
+      });
+      child.unref();
+      setTimeout(() => quit(), 250);
+    });
+  }
   try {
     await desk.start();
   } catch (e) {
@@ -58,7 +70,7 @@ async function boot() {
   });
   desk.on("show", ({ project, todo }) => showMain(project, todo));
   desk.on("config", onConfig);
-  desk.on("change", updateTray);
+  desk.on("change", () => { rebuildTrayMenu(); updateTray(); });
   applyAutostart();
   createTray();
   createWindow();
@@ -161,22 +173,35 @@ function showDiagnostics() {
   win.webContents.executeJavaScript("window.abDiagnostics && window.abDiagnostics()").catch(() => {});
 }
 
+function showUpdates() {
+  showMain();
+  win.webContents.executeJavaScript("window.abUpdates && window.abUpdates()").catch(() => {});
+}
+
 // --- tray --------------------------------------------------------------------------
+
+let lastTrayUpdateTag = "";
 
 function createTray() {
   tray = new Tray(nativeImage.createFromPath(ICON));
   tray.on("click", () => showMain());
-  rebuildTrayMenu();
+  rebuildTrayMenu(true);
   updateTray();
 }
 
-function rebuildTrayMenu() {
+function rebuildTrayMenu(force = false) {
   if (!tray) return;
+  const upd = desk?.updater?.state;
+  const updTag = upd?.available ? `avail:${upd.latest_version}` : "none";
+  if (!force && updTag === lastTrayUpdateTag) return;
+  lastTrayUpdateTag = updTag;
+  const updLabel = upd?.available ? `Доступно обновление ${upd.latest_version}…` : "Проверить обновления…";
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "Открыть Agent Desk", click: () => showMain() },
     { label: "Другие компьютеры…", click: () => showPeers() },
     { label: "Тихие часы и уведомления…", click: () => showNotifySettings() },
     { label: "Диагностика и отказы…", click: () => showDiagnostics() },
+    { label: updLabel, click: () => showUpdates() },
     { type: "separator" },
     { label: "Всплывающие окна", type: "checkbox", checked: !!desk.config.notify, click: (i) => setConfig({ notify: i.checked }) },
     { label: "Запускать вместе с Windows", type: "checkbox", checked: !!desk.config.autostart, click: (i) => setConfig({ autostart: i.checked }) },
@@ -190,10 +215,11 @@ function updateTray() {
   const open = desk.state.todos.filter((t) => !t.done_at && !t.superseded_by && !t.quiet && !["receipt", "ack", "delivery"].includes(t.kind) && !(t.kind === "forward" && (t.forwarded_at || t.acked_at || (t.delivery_target && t.delivery_target !== desk.config.device_id)))).length;
   const submitted = Object.values(desk.state.tasks || {}).filter((t) => t.state === "submitted" && (!t.coordinator_device_id || t.coordinator_device_id === desk.config.device_id)).length;
   const quiet = desk._inQuietHours() ? " · тихие часы" : "";
+  const upd = desk.updater?.state?.available ? ` · обновление ${desk.updater.state.latest_version}` : "";
   const parts = [];
   if (open) parts.push(`нужно сделать: ${open}`);
   if (submitted) parts.push(`на проверке: ${submitted}`);
-  tray.setToolTip(`${TITLE} — ${parts.length ? parts.join(" · ") : "всё под контролем"}${quiet}`);
+  tray.setToolTip(`${TITLE} — ${parts.length ? parts.join(" · ") : "всё под контролем"}${quiet}${upd}`);
 }
 
 function setConfig(patch) {
@@ -210,7 +236,7 @@ function applyAutostart() {
 
 async function onConfig() {
   applyAutostart();
-  rebuildTrayMenu();
+  rebuildTrayMenu(true);
   updateTray();
   if (desk.lanEnabled !== boundLan) {
     // Wi-Fi access on/off: listen again on the same port (127.0.0.1 only, or the whole network).
@@ -328,11 +354,18 @@ ipcMain.handle("qr", async (e, text) => {
   if (senderWindow(e) !== win || typeof text !== "string" || text.length > 500) return null;
   return require("qrcode").toString(text, { type: "svg", errorCorrectionLevel: "M", margin: 2 });
 });
+ipcMain.handle("open-external", async (e, rawUrl) => {
+  if (senderWindow(e) !== win || typeof rawUrl !== "string") return false;
+  if (!/^https:\/\/github\.com\/purrfect0\/AgentDesk(?:\/|$)/i.test(rawUrl)) return false;
+  await shell.openExternal(rawUrl);
+  return true;
+});
 ipcMain.on("popup", (e, what) => {
   const w = senderWindow(e);
   if (!w || !w.agentAlert) return;
   if (what === "open") {
     if (w.agentAlert.kind === "peer") showPeers();
+    else if (w.agentAlert.kind === "update") showUpdates();
     else showMain(w.agentAlert.project, w.agentAlert.todo);
   }
   if (what === "gone") w.destroy(); // the leave animation has finished

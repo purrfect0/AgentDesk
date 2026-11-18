@@ -13,8 +13,9 @@ const { EventEmitter } = require("node:events");
 const { SyncJournal, stableId, UUID } = require("./sync.js");
 const { classifyRuntimeRejection, MARKER_TEMPLATES } = require("./marker-schema.js");
 const { AdapterRegistry } = require("./adapters.js");
+const { UpdateManager } = require("./updater.js");
 
-const VERSION = "2.3.5"; // the app version, the same as in package.json (a test checks it)
+const VERSION = "2.3.6"; // the app version, the same as in package.json (a test checks it)
 const PROTOCOL = 3;
 const STATES = new Set(["working", "waiting", "done", "blocked", "idle"]);
 const WAITING_FOR = new Set([
@@ -315,7 +316,7 @@ const REMINDER_KINDS = new Set(["forward", "reply", "blocked", "limit"]);
 // Win98 icon (web/icons/<name>.png, 32x32) of each alert kind: PC popup, phone notification.
 const ALERT_ICON = {
   forward: "envelope_closed-0", reply: "msg_question-0", blocked: "msg_error-0", limit: "msg_warning-0",
-  done: "check-0", bad: "msg_error-0", peer: "network_normal_two_pcs-0",
+  done: "check-0", bad: "msg_error-0", peer: "network_normal_two_pcs-0", update: "world-0",
 };
 
 class Desk extends EventEmitter {
@@ -356,6 +357,7 @@ class Desk extends EventEmitter {
     this.peers = new PeerLink(this, { discovery: o.discovery });
     this.sync = new SyncJournal(this);
     this.adapters = new AdapterRegistry();
+    this.updater = new UpdateManager(this, { enabled: Boolean(o.updateChecks), ...(o.updater || {}) });
     this._buildForwardText = forwardText;
     const { TaskService } = require("./tasks.js");
     const { MailStore } = require("./mail.js");
@@ -392,13 +394,15 @@ class Desk extends EventEmitter {
       port: 8098, lan: true, notify: true, popup_sound: true, popup_volume: 80, stale_minutes: 90, autostart: true,
       retention_days: 0, watch: [{ path: path.join(this.dataDir, "markers"), project: "" }],
       agents: {}, aliases: {}, agent_registry: {}, external_adapters_enabled: false, resource_status_files: {},
-      allowed_hosts: [], file_sync_enabled: false,
+      allowed_hosts: [], file_sync_enabled: false, update_check: true, last_notified_update: "",
       quiet_hours: { enabled: false, start: "23:00", end: "08:00" }, notify_projects: {},
       ...cfg,
     };
     const c = this.config;
     c.file_sync_enabled = c.file_sync_enabled === true;
     c.external_adapters_enabled = c.external_adapters_enabled === true;
+    c.update_check = c.update_check !== false;
+    c.last_notified_update = oneLine(c.last_notified_update, 40);
     const hhmmRe = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
     c.quiet_hours = {
       enabled: c.quiet_hours?.enabled === true,
@@ -1508,6 +1512,7 @@ class Desk extends EventEmitter {
       phone_status: this.phoneStatus(),
       resources: this.resourceStatus(),
       adapters: this.adapters.probeAll(c),
+      update: this.updater.payload(auth),
       alert_seq: s.alert_seq,
       alerts: s.alerts.filter((a) => !a.suppressed).slice(-10),
       warnings: this.warnings.map((w) => ({ ...w, text: scrubWarn(w.text) })),
@@ -1519,6 +1524,7 @@ class Desk extends EventEmitter {
         popup_volume: c.popup_volume, autostart: c.autostart, retention_days: c.retention_days,
         agents: c.agents, aliases: c.aliases, agent_registry: c.agent_registry || {},
         external_adapters_enabled: Boolean(c.external_adapters_enabled),
+        update_check: c.update_check !== false,
         task_repo_roots: localOwner ? (c.task_repo_roots || []) : [],
         task_skill_roots: localOwner ? (c.task_skill_roots || []) : [],
         file_sync_enabled: this.fileSyncEnabled,
@@ -1906,6 +1912,7 @@ class Desk extends EventEmitter {
         return this._waitAlerts(res, url, cors);
       }
       if (url.pathname === "/api/diagnostics") return this._send(res, 200, this.diagnosticsExport(), cors);
+      if (url.pathname === "/api/update") return this._send(res, 200, this.updater.payload(auth), cors);
       if (url.pathname === "/api/resources") return this._send(res, 200, this.resourceStatus(), cors);
       if (url.pathname === "/api/adapters/probe") {
         const id = url.searchParams.get("adapter");
@@ -1941,7 +1948,9 @@ class Desk extends EventEmitter {
     }
     const r = url.pathname.startsWith("/api/peers/")
       ? await this.peers.local(url.pathname.slice("/api/peers/".length), body && typeof body === "object" ? body : {}, auth)
-      : this._post(url.pathname, body, auth);
+      : url.pathname.startsWith("/api/update/")
+        ? await this.updater.local(url.pathname.slice("/api/update/".length), body && typeof body === "object" ? body : {}, auth)
+        : this._post(url.pathname, body, auth);
     return this._send(res, r.code || 200, r.body || { ok: true }, cors);
   }
 
@@ -2173,7 +2182,7 @@ class Desk extends EventEmitter {
 
   _updateConfig(body, auth) {
     const c = this.config;
-    const admin = ["watch", "lan", "autostart", "agents", "aliases", "agent_registry", "external_adapters_enabled", "resource_status_files", "allowed_hosts", "retention_days", "task_repo_roots", "task_skill_roots"].filter((k) => k in body);
+    const admin = ["watch", "lan", "autostart", "update_check", "agents", "aliases", "agent_registry", "external_adapters_enabled", "resource_status_files", "allowed_hosts", "retention_days", "task_repo_roots", "task_skill_roots"].filter((k) => k in body);
     if (admin.length && !auth.local) return { code: 403, body: { error: `эти настройки меняются только на ПК: ${admin.join(", ")}` } };
     let watch = null;
     if ("watch" in body) {
@@ -2199,7 +2208,7 @@ class Desk extends EventEmitter {
       if (!Array.isArray(roots) || roots.length > 20 || roots.some(p => typeof p !== "string" || !path.isAbsolute(p) || !fs.existsSync(p) || !fs.lstatSync(p).isDirectory() || fs.lstatSync(p).isSymbolicLink())) return { code: 400, body: { error: `${key}: нужны существующие обычные папки (до 20)` } };
     }
     for (const key of ["task_repo_roots", "task_skill_roots"]) if (key in body) c[key] = [...new Set(body[key])];
-    for (const k of ["notify", "popup_sound", "autostart", "lan"]) if (typeof body[k] === "boolean") c[k] = body[k];
+    for (const k of ["notify", "popup_sound", "autostart", "lan", "update_check"]) if (typeof body[k] === "boolean") c[k] = body[k];
     if (body.quiet_hours && typeof body.quiet_hours === "object" && !Array.isArray(body.quiet_hours)) {
       const hhmmRe = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
       if ("enabled" in body.quiet_hours && typeof body.quiet_hours.enabled === "boolean") c.quiet_hours.enabled = body.quiet_hours.enabled;
@@ -2269,10 +2278,12 @@ class Desk extends EventEmitter {
     this._tick();
     this.timer = setInterval(() => this._tick(), this.pollMs);
     this.peers.start();
+    this.updater.start();
     return this;
   }
 
   async stop() {
+    this.updater.stop();
     this.peers.stop();
     clearInterval(this.timer);
     this.timer = null;

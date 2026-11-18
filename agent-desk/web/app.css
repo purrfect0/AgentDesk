@@ -274,6 +274,11 @@ tr.group td {
 .peer-row button { flex: none; }
 .peer-code { font-family: "Courier New", monospace; font-size: 14px; letter-spacing: 2px; }
 .peer-warn { background: #ffffe1; border: 1px solid #000; padding: 4px 6px; }
+.update-banner { display: flex; align-items: center; gap: 6px; flex: none; margin: 0 0 4px; }
+.update-banner > img { width: 16px; height: 16px; flex: none; }
+.update-banner > span { flex: 1; min-width: 0; }
+.update-progress { margin: 8px 0 4px; }
+.update-notes { max-height: 150px; min-height: 60px; font-family: inherit; font-size: inherit; }
 td .peer-note .bad { color: #a00000; }
 table.interactive > tbody > tr.highlighted td .peer-note .bad { color: #ffd0d0; }
 

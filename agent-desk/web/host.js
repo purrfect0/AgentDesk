@@ -86,6 +86,14 @@
     headers() { return mobile && server ? { "X-Agent-Desk-Key": server.key } : {}; },
     notifyPermission,
     watch,
+    async openExternal(url) {
+      const s = String(url || "");
+      if (!/^https:\/\/github\.com\/purrfect0\/AgentDesk(?:\/|$)/i.test(s)) return false;
+      if (desktop && typeof desktop.openExternal === "function") return desktop.openExternal(s);
+      if (native() && typeof native().openExternal === "function") { await native().openExternal({ url: s }); return true; }
+      window.open(s, "_blank", "noopener,noreferrer");
+      return true;
+    },
     /** A tap on a phone notification opens the app on that reminder: cb(project, todoId). */
     onNotificationTap(cb) {
       native()?.addListener("tap", (e) => {

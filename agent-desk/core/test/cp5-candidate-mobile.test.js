@@ -65,6 +65,8 @@ describe("CP5 — Candidate Version Parity, Mobile Web/Font Pipeline & Android W
     assert.equal(lock.version, VERSION);
     assert.equal(lock.packages[""].version, VERSION);
     assert.equal(mobilePkg.version, VERSION);
+    const appJs = fs.readFileSync(path.join(AGENT_DESK_ROOT, "web", "app.js"), "utf8");
+    assert.match(appJs, new RegExp(`const CLIENT_VERSION = "${VERSION.replace(/\./g, "\\.")}";`));
 
     const changelog = fs.readFileSync(path.join(REPO_ROOT, "CHANGELOG.md"), "utf8").split(/\r?\n/);
     let p = false;
