@@ -313,10 +313,10 @@ class TaskService {
     task.updated = row.time;
   }
 
-  _assignmentMessage(task) {
+  _assignmentMessage(task, { selfStarted = false } = {}) {
     const s = this.desk.state;
     const messageId = stableId(`assignment:${task.task_id}:${task.assignment.epoch}`);
-    if (s.todos.some(t => t.message_id === messageId)) { task.assignment_message_id = messageId; return; }
+    if (s.todos.some(t => t.message_id === messageId)) { task.assignment_message_id = messageId; return null; }
     const a = task.assignment, time = task.updated;
     const cp = task.checkpoint || {};
     const context = [["Репозиторий", cp.repo], ["Ветка", cp.branch], ["Коммит", cp.commit], ["Папка OUT", cp.out_dir], ["Отчёт", cp.report], ["Следующий шаг", cp.next_step]]
@@ -331,7 +331,11 @@ class TaskService {
       message_id: messageId, origin_device_id: task.coordinator_device_id,
       purpose: "assignment", assignment_epoch: a.epoch, recipient_session_id: a.session_id,
       recipient_device_id: a.device_id, created: time, updated: time,
-      forwarded_at: null, acked_at: null, done_at: null, receipt_epoch: 0, auto: false,
+      forwarded_at: selfStarted ? time : null,
+      acked_at: selfStarted ? time : null,
+       ...(selfStarted ? { acked_by: a.agent } : {}),
+      done_at: selfStarted ? time : null,
+      receipt_epoch: 0, auto: Boolean(selfStarted),
     };
     const envelope = { id: crypto.randomUUID(), origin: task.coordinator_device_id, clock: Number.MAX_SAFE_INTEGER, type: "todo", entity_id: messageId, data: todo, deleted: false, time };
     if (Buffer.byteLength(JSON.stringify(envelope), "utf8") > 58000) fail(400, "Assignment prompt exceeds 58,000 bytes; shorten it or reference an attachment (space is reserved for receipts)");
@@ -345,6 +349,38 @@ class TaskService {
     task.assignment_message_id = messageId;
     s.next_id = id + 1;
     s.todos.push(todo);
+    return todo;
+  }
+
+  _reworkMessage(task, actor, reworkText) {
+    const cleanText = String(reworkText || "").trim();
+    if (!cleanText) return null;
+    const s = this.desk.state;
+    const a = task.assignment, time = task.updated;
+    const messageId = crypto.randomUUID();
+    const sender = actor?.agent && actor.agent !== "owner" ? actor.agent : "Владелец";
+    const id = s.next_id || 1;
+    const todo = {
+      id, display_id: `AD-${id}`, kind: "forward", project: task.project, project_id: task.project_id,
+      agent: sender, to: a.agent, task: task.title, task_id: task.task_id,
+      message: `Возвращено на доработку:\n${cleanText}`,
+      message_id: messageId, origin_device_id: task.coordinator_device_id,
+      purpose: "rework", assignment_epoch: a.epoch, recipient_session_id: a.session_id,
+      recipient_device_id: a.device_id, created: time, updated: time,
+      forwarded_at: null, acked_at: null, done_at: null, receipt_epoch: 0, auto: false,
+    };
+    const envelope = { id: crypto.randomUUID(), origin: task.coordinator_device_id, clock: Number.MAX_SAFE_INTEGER, type: "todo", entity_id: messageId, data: todo, deleted: false, time };
+    if (Buffer.byteLength(JSON.stringify(envelope), "utf8") > 58000) fail(400, "Rework message exceeds 58,000 bytes");
+    for (const prior of s.todos) {
+      if (prior.task_id !== task.task_id || prior.purpose === "assignment" || prior.done_at) continue;
+      prior.superseded_by = messageId;
+      prior.done_at = time;
+      prior.closed_reason = "rework";
+      prior.updated = time;
+    }
+    s.next_id = id + 1;
+    s.todos.push(todo);
+    return todo;
   }
 
   originKind(task) {
@@ -355,7 +391,8 @@ class TaskService {
   lifecycleSigns(task) {
     const todos = Array.isArray(this.desk.state.todos) ? this.desk.state.todos : [];
     const localDevice = this.desk.config.device_id;
-    const activeMsg = (task.assignment_message_id && todos.find((t) => t.message_id === task.assignment_message_id))
+    const activeMsg = (task.state === "rework" && todos.findLast((t) => t.task_id === task.task_id && !t.superseded_by && t.purpose === "rework"))
+      || (task.assignment_message_id && todos.find((t) => t.message_id === task.assignment_message_id))
       || todos.find((t) => t.task_id === task.task_id && !t.superseded_by && t.purpose === "assignment")
       || null;
     const needsForward = Boolean(
@@ -470,7 +507,7 @@ class TaskService {
     if (!Array.isArray(todos)) return;
     const time = task.updated || now();
     for (const row of todos) {
-      if (row.task_id === task.task_id && row.purpose === "assignment" && !row.done_at) {
+      if (row.task_id === task.task_id && !row.done_at) {
         row.done_at = time;
         row.closed_reason = reasonState;
         row.updated = time;
@@ -478,7 +515,7 @@ class TaskService {
     }
   }
 
-  _put(task, persist, publishAssignment = false, reqSpec = null) {
+  _put(task, persist, publishAssignment = false, reqSpec = null, putOpts = {}) {
     const state = this.desk.state;
     const before = persist ? clone(state) : null;
     const dirtyBefore = this.desk.dirty;
@@ -489,9 +526,22 @@ class TaskService {
     if (publishAssignment) task.assignment_message_id = stableId(`assignment:${task.task_id}:${a.epoch}`);
     const envelope = { id: crypto.randomUUID(), origin: "x".repeat(128), clock: Number.MAX_SAFE_INTEGER, type: "task", entity_id: task.task_id, data: task, deleted: false, time: now() };
     if (Buffer.byteLength(JSON.stringify(envelope), "utf8") > 60000) fail(400, "Task exceeds the 60,000-byte sync event budget; shorten checkpoint/artifacts/history text");
+    let createdTodo = null;
     try {
-      if (publishAssignment) this._assignmentMessage(task);
-      if (["cancelled", "archived"].includes(task.state)) this._retireOpenAssignmentTodos(task, task.state);
+      if (publishAssignment) createdTodo = this._assignmentMessage(task, { selfStarted: Boolean(putOpts.selfStarted) });
+      if (putOpts.reworkText) createdTodo = this._reworkMessage(task, putOpts.actor, putOpts.reworkText);
+      else if (task.state === "rework") {
+        const time = task.updated || now();
+        for (const row of state.todos || []) {
+          if (row.task_id === task.task_id && row.purpose !== "assignment" && !row.done_at) {
+            row.done_at = time;
+            row.closed_reason = "rework";
+            row.updated = time;
+          }
+        }
+      }
+      if (["accepted", "cancelled", "archived"].includes(task.state)) this._retireOpenAssignmentTodos(task, task.state);
+      if (createdTodo && !putOpts.selfStarted) this.desk.bridge?.tryAutoDispatchTodo?.(createdTodo);
       state.tasks = { ...state.tasks, [task.task_id]: task };
       state.bindings = { ...state.bindings, [binding.id]: binding };
       if (reqSpec) {
@@ -506,6 +556,30 @@ class TaskService {
     }
     if (persist) this.desk.emit("change");
     return clone(task);
+  }
+
+  bind(body) {
+    if (!object(body)) fail(400, "body must be an object");
+    const { project } = this._project(body);
+    let agent = text(body.agent, "agent", 60, true);
+    if (typeof this.desk.canonical === "function") agent = this.desk.canonical(project, agent);
+    const device = identity(body.device_id ?? this.desk.config.device_id, "device_id");
+    const session = identity(body.session_id ?? body.session, "session_id", true);
+    const role = text(body.role ?? "coordinator", "role", 60, true);
+    const adapter = identity(body.adapter ?? "manual", "adapter");
+    const state = this.desk.state;
+    const before = clone(state);
+    const existing = Object.values(state.bindings || {}).find((b) => b.project === project && this._same(b.agent, agent, project) && b.device_id === device && b.session_id === session && b.role === role);
+    const binding = existing ? { ...existing, adapter } : { id: crypto.randomUUID(), project, agent, role, device_id: device, session_id: session, adapter };
+    try {
+      state.bindings = { ...(state.bindings || {}), [binding.id]: binding };
+      this.desk._saveState();
+    } catch (e) {
+      this.desk.state = before;
+      throw e;
+    }
+    this.desk.emit("change");
+    return { ok: true, binding: clone(binding) };
   }
 
   _checkAgentRegistryActive(project, agent) {
@@ -537,12 +611,15 @@ class TaskService {
       assignment.epoch = prior.epoch + 1;
     }
     if (!task) task = this._new(body, assignment, coordinator);
+    const selfStarted = Boolean(body.self_started);
     const old = task.state;
     task.assignment = assignment;
-    task.state = "assigned";
+    task.state = selfStarted ? "working" : "assigned";
     delete task.status_reason;
     task.managed_assignment = true;
-    task.launch = { status: "needs_manual_launch", adapter: assignment.adapter, reason: "No launch adapter is implemented; copy context into the target session manually." };
+    task.launch = selfStarted
+      ? { status: "self_started", adapter: assignment.adapter, reason: "Задача создана и сразу начата самим исполнителем/ведущим." }
+      : { status: "needs_manual_launch", adapter: assignment.adapter, reason: "No launch adapter is implemented; copy context into the target session manually." };
     if (body.prompt !== undefined || body.message !== undefined) {
       const prompt = text(body.prompt ?? body.message, "prompt", 20000, false, true);
       if (prompt) task.prompt = prompt;
@@ -550,7 +627,7 @@ class TaskService {
     }
     metadata(body, task);
     this._history(task, "assign", body, old, prior);
-    return this._put(task, true, true, reqSpec);
+    return this._put(task, true, true, reqSpec, { selfStarted });
   }
 
   _state(body, task, observed = false) {
@@ -589,9 +666,10 @@ class TaskService {
     if (task.state === "cancelled") task.status_reason = reasonText;
     else if (task.state === "archived") task.status_reason = reasonText || task.status_reason || "Перенесено в архив владельцем";
     else if (task.state === "rework") delete task.status_reason;
+    const reworkText = task.state === "rework" ? text(body.message ?? body.reason ?? body.note, "message", 20000, false, true) : "";
     metadata(body, task);
     this._history(task, "transition", { ...body, note: body.note ?? reasonText }, old, undefined, actor);
-    return this._put(task, true, false, reqSpec);
+    return this._put(task, true, false, reqSpec, { actor, reworkText });
   }
 
   handoff(body) {
@@ -693,6 +771,14 @@ class TaskService {
       task.state = this._state({ execution_state: inferred, device_id: actor?.device_id ?? task.assignment.device_id }, task, true);
       if (task.state === "cancelled") task.status_reason = reasonText;
       else if (task.state === "archived") task.status_reason = reasonText || task.status_reason || "Перенесено в архив";
+      if (old === "rework" && ["working", "submitted"].includes(task.state)) {
+        const at = ev.received || now();
+        for (const row of this.desk.state.todos || []) {
+          if (row.task_id === task.task_id && row.purpose === "rework" && !row.done_at) {
+            row.forwarded_at ||= at; row.acked_at ||= at; row.acked_by ||= ev.agent; row.done_at = at; row.updated = at;
+          }
+        }
+      }
     }
     metadata(ev, task);
     this._history(task, "observe", ev, old, undefined, actor);

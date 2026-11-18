@@ -58,7 +58,7 @@ let seenAlerts = null;
 let online = true;
 let lastUpdated = null;
 let dialogReturnFocus = null;
-const CLIENT_VERSION = "2.3.6";
+const CLIENT_VERSION = "2.4.0";
 let phoneNotify = localStorage.getItem("ad.phoneNotify") !== "0";
 let dismissedUpdate = localStorage.getItem("ad.dismissUpdate") || "";
 
@@ -284,11 +284,15 @@ function todoStatus(t) {
       if (t.delivered_at) return `доставлено на другой ПК · ожидает получения${t.to ? ` (${esc(t.to)})` : ""} (нет ACK${waitAge ? `, ${esc(waitAge)}` : ""})`;
       return targetPeer?.online === false ? "компьютер не в сети · ожидает доставки" : "ожидает доставки";
     }
+    if (t.auto_relayed_at) {
+      const waitAge = ago(t.auto_relayed_at);
+      return `автопилот передал · ждём ACK${t.to ? ` от ${esc(t.to)}` : ""}${waitAge ? ` (${esc(waitAge)})` : ""}`;
+    }
     if (t.forwarded_at) {
       const waitAge = ago(t.forwarded_at);
       return `переслано · ожидает получения${t.to ? ` от ${esc(t.to)}` : ""}${waitAge ? ` (${esc(waitAge)})` : ""}`;
     }
-    return t.purpose === "assignment" ? "<b>не переслано задание</b>" : "<b>не переслано</b>";
+    return t.purpose === "assignment" ? "<b>не переслано задание</b>" : t.purpose === "rework" ? "<b>не переслана доработка</b>" : "<b>не переслано</b>";
   }
   const waitAge = ago(t.created);
   const tail = waitAge ? ` <span class="sub">(${esc(waitAge)})</span>` : "";
@@ -408,6 +412,7 @@ function render() {
   const phoneOff = Boolean(data.phone_status?.last_seen_at && !data.phone_status.connected);
   const rejCount = Number(data.pipeline?.rejected ?? data.rejected?.length ?? 0);
   const sbExtras = [
+    data.config?.autopilot?.enabled && "автопилот вкл.",
     quietActive && `тихие часы (${data.config.quiet_hours.start || "23:00"}–${data.config.quiet_hours.end || "08:00"})`,
     phoneOff && "телефон отключён",
     rejCount > 0 && `отказов: ${rejCount}`,
@@ -1038,11 +1043,18 @@ function contextRootsDialog() {
 function assignmentFields(t) {
   const a = t?.assignment || {};
   const bindings = listValues(data.bindings).filter((b) => !t || b.project === t.project);
-  const field = (key, label, value, required = true) => `<div class="field-row-stacked"><label for="assign-${key}">${label}</label><input id="assign-${key}" name="${key}" type="text" value="${esc(value)}"${required ? " required" : ""} autocomplete="off" spellcheck="false" maxlength="240"></div>`;
-    const devices = new Map([[data.device_id, data.link?.name || "этот компьютер"], ...(data.link?.peers || []).map(p => [p.id, p.name || "другой компьютер"])]);
+  const projKnown = [...new Set([
+    ...(t?.project ? (data.known_agents?.[t.project] || []) : Object.values(data.known_agents || {}).flat()),
+    ...(data.config?.agents?.["*"] || []),
+  ].filter(Boolean))];
+  const field = (key, label, value, required = true, listId = "") => `<div class="field-row-stacked"><label for="assign-${key}">${label}</label><input id="assign-${key}" name="${key}" type="text" value="${esc(value)}"${listId ? ` list="${listId}"` : ""}${required ? " required" : ""} autocomplete="off" spellcheck="false" maxlength="240"></div>`;
+  const devices = new Map([[data.device_id, data.link?.name || "этот компьютер"], ...(data.link?.peers || []).map(p => [p.id, p.name || "другой компьютер"])]);
   if (a.device_id && !devices.has(a.device_id)) devices.set(a.device_id, "ранее привязанный компьютер");
   const deviceSelect = `<div class="field-row-stacked"><label for="assign-device_id">Компьютер</label><select id="assign-device_id" name="device_id">${[...devices].map(([id,name]) => `<option value="${esc(id)}"${id === (a.device_id || data.device_id) ? " selected" : ""}>${esc(name)}</option>`).join("")}</select></div>`;
-  return `${bindings.length ? `<div class="field-row-stacked"><label for="assign-binding">Сохранённая привязка</label><select id="assign-binding"><option value="">Введите вручную</option>${bindings.map((b, i) => `<option value="${i}">${esc(`${b.agent} · ${deviceLabel(b.device_id)} · ${b.role || "без роли"} · привязка ${i + 1}`)}</option>`).join("")}</select></div>` : ""}<div class="assignment-grid">${field("agent", "Имя агента", a.agent)}${deviceSelect}</div><details><summary>Привязка сессии и роль</summary><p class="sub">Для ручной пересылки сессия создаётся автоматически и добавляется в промпт. Если агент уже подключён, выберите его сохранённую привязку.</p><div class="assignment-grid">${field("session_id", "Привязка сессии агента", a.session_id)}${field("role", "Роль (executor / reviewer / coordinator)", a.role || "executor")}${field("adapter", "Адаптер запуска", a.adapter || "manual", false)}</div></details>`;
+  const datalists = `<datalist id="assign-agent-list">${projKnown.map((n) => `<option value="${esc(n)}">`).join("")}</datalist>
+    <datalist id="assign-role-list"><option value="executor"><option value="reviewer"><option value="coordinator"></datalist>
+    <datalist id="assign-adapter-list"><option value="manual"><option value="codex-cli"><option value="mock-dry-run"></datalist>`;
+  return `${bindings.length ? `<div class="field-row-stacked"><label for="assign-binding">Сохранённая привязка</label><select id="assign-binding"><option value="">Введите вручную</option>${bindings.map((b, i) => `<option value="${i}">${esc(`${b.agent} · ${deviceLabel(b.device_id)} · ${b.role || "без роли"} · привязка ${i + 1}`)}</option>`).join("")}</select></div>` : ""}<div class="assignment-grid">${field("agent", "Имя агента", a.agent, true, "assign-agent-list")}${deviceSelect}</div><details><summary>Привязка сессии и роль</summary><p class="sub">Для ручной пересылки сессия создаётся автоматически. Для прямой отправки в Codex выберите адаптер <code>codex-cli</code> и укажите UUID/имя треда Codex в поле сессии.</p><div class="assignment-grid">${field("session_id", "Привязка сессии агента", a.session_id)}${field("role", "Роль (executor / reviewer / coordinator)", a.role || "executor", true, "assign-role-list")}${field("adapter", "Адаптер запуска (manual / codex-cli)", a.adapter || "manual", false, "assign-adapter-list")}</div></details>${datalists}`;
 }
 function taskMutationDialog(mode, t, presetState = "") {
   if (!online || (mode !== "transition" && !canCoordinate(t))) return;
@@ -1650,22 +1662,22 @@ function leadPrompt(target = {}) {
 
 Шаг 1. Сам подключись к Agent Desk и осмотрись (выполни сразу без лишних вопросов):
 1. Проверь доступный канал на этом ПК:
-   - если подключён MCP-сервер agent-desk — используй инструменты agent_desk_{status,inbox,read,ack,submit,assign,handoff,transition,coordinate,context,validate};
+   - если подключён MCP-сервер agent-desk — используй инструменты agent_desk_{status,inbox,read,ack,submit,assign,handoff,transition,coordinate,bind,wait,context,validate};
    - иначе вызывай штатный CLI Windows: "C:\\Program Files\\Agent Desk\\agentdesk.cmd" (или "%LOCALAPPDATA%\\Programs\\Agent Desk\\agentdesk.cmd"; отдельный Node.js ему не нужен).
    - Никогда не редактируй файлы state.json / config.json напрямую и не выводи секретные ключи: CLI и MCP сами читают локальный agent_key.
 2. Выполни status (--json "{}") и inbox (--json "{}"): проверь открытые задачи, привязки, project_id и входящие сообщения.
-3. Придумай для своего чата уникальный session_id (например <имя>-lead-YYYYMMDD-a). Если своей карточки координатора по проекту ещё нет — создай её на себя через assign с role: "coordinator" (это закрепит твою привязку координатора проекта для приёмки задач), затем отправь статус working (seq: 1) через submit. Если во входящих есть адресованное тебе сообщение с message_id — сразу подтверди его получение через ack.
+3. Придумай для своего чата уникальный session_id (например <имя>-lead-YYYYMMDD-a), зарегистрируй себя ведущим через bind (project, agent, session_id, role: "coordinator" — без создания пустых карточек!) и отправь стартовый статус working (seq: 1) через submit. Если делаешь задачу лично — создавай её через assign с self_started: true (чтобы не вешать владельцу лишнее напоминание на самого себя). Если во входящих есть сообщение с message_id — сразу подтверди его через ack.
 
-Шаг 2. Сам создавай задачи и готовые промпты в один клик для владельца:
-1. Если задачу целесообразно сделать самому — веди её на своей карточке, регулярно обновляй этапы через submit и доведи до результата.
+Шаг 2. Сам создавай задачи и обмен без участия владельца:
+1. Если задачу целесообразно сделать самому — веди её на своей карточке (self_started: true), регулярно обновляй этапы через submit и доведи до результата.
 2. Если работу выполняют другие агенты/сессии — декомпозируй план и создавай назначения через assign --file <временный.json> (многострочный UTF-8 JSON всегда передавай через --file, чтобы оболочка не ломала кавычки и кириллицу).
-3. В каждом assign указывай: project (и project_id, если уже известен), понятный title, agent, device_id, свежий session_id исполнителя, role ("worker" или "reviewer"), checkpoint (branch, out_dir, verification_steps, next_step) и полный самодостаточный prompt (до 20000 символов, конверт <= 58000 Б UTF-8).
-4. Agent Desk сам допишет в конец копируемого сообщения точные project_id, task_id, assignment_epoch, session_id, device_id и message_id, а ты в конец prompt для исполнителя обязательно добавь короткие правила отчётности:
+3. В каждом assign указывай: project (и project_id, если уже известен), понятный title, agent, device_id, свежий session_id исполнителя (для прямой доставки в Codex можно указать adapter: "codex-cli" и UUID/имя треда Codex), role ("worker" или "reviewer"), checkpoint (branch, out_dir, verification_steps, next_step) и полный самодостаточный prompt (до 20000 символов, конверт <= 58000 Б UTF-8).
+4. Agent Desk сам допишет в конец копируемого сообщения точные project_id, task_id, assignment_epoch, session_id, device_id и message_id, а ты в конец prompt для исполнителя обязательно добавь короткие правила отчётности и автономного ожидания:
    - брать реквизиты из футера «[Agent Desk]» в конце задания;
    - при старте отправить ack на message_id + статус working, а при сдаче — state: "done", execution_state: "submitted", to: "<твоё имя ведущего>", ветку, SHA коммита и краткий путь к отчёту через agentdesk.cmd submit (или MCP agent_desk_submit);
-   - перед отправкой проверять маркер офлайн через agentdesk.cmd validate --file ... (или MCP agent_desk_validate).
-   Тогда владельцу в окне Agent Desk достаточно нажать одну кнопку «Переслать задание» и вставить готовый текст в чат исполнителя.
-5. Не вызывай повторно assign для пересылки неизменённого текста (это увеличит assignment_epoch) — читай существующее поручение через read --id <task_id>. При смене исполнителя, компьютера или при лимите модели (model_limit) используй handoff (а для переноса ведущего узла задачи на другой ПК — coordinate).
+   - перед отправкой проверять маркер офлайн через agentdesk.cmd validate --file ... (или MCP agent_desk_validate);
+   - чтобы работать без будильника для владельца: в конце своего хода запускать в фоне agentdesk.cmd wait --agent "<имя>" --project "<проект>" --wait-seconds 1800 — тогда чат сам проснётся с нулевым расходом токенов, как только придёт ответ или доработка!
+5. Когда сам отправил поручение исполнителю и ждёшь его отчёта — тоже запускай в фоне agentdesk.cmd wait --agent "<твоё имя ведущего>" --project "<проект>" --wait-seconds 1800 перед завершением хода, чтобы автоматически проснуться и принять работу без участия человека. Не вызывай повторно assign для пересылки неизменённого текста — читай существующее поручение через read <task_id>. При смене исполнителя, ПК или при model_limit используй handoff (для переноса ведущего узла — coordinate).
 
 Шаг 3. Жёсткие инварианты, контроль качества и чистота доски:
 - Разделяй этапы: создание карточки != владелец переслал != ACK получения (ack НЕ означает готовность!) != working != submitted (сдано на ревью) != accepted (принято ведущим).
@@ -2100,6 +2112,137 @@ const ACTIONS = {
       try { localStorage.setItem("ad.dismissUpdate", ver); } catch { /* ignore */ }
     }
     renderUpdateBanner();
+  },
+  async autopilot() {
+    if (!data) return;
+    const isPhone = AD_HOST.kind === "mobile";
+    const canAdmin = isLocal && !isPhone;
+    if (!canAdmin) {
+      const ap = data.autopilot || {};
+      const rows = (ap.sessions || []).map((s) => `<li><b>${esc(s.agent || s.provider)}</b> (${esc(s.provider)})${s.project ? ` · ${esc(s.project)}` : ""} · ${esc(ago(s.updated_at))}</li>`).join("");
+      dialog("Автопилот и живые чаты", `<p>Автопилот на ПК: <b>${ap.enabled ? "включён" : "выключен"}</b> · лимит передач подряд: <b>${esc(ap.max_relays_per_task || 6)}</b>.</p>
+        <p class="sub">Полные тексты живых чатов и настройка хуков доступны только непосредственно на ведущем ПК (не передаются по Wi-Fi на телефон).</p>
+        <h3>Активные сессии (${(ap.sessions || []).length})</h3>
+        ${rows ? `<ul class="receipt-list">${rows}</ul>` : '<p class="sub">Активных сессий пока не зафиксировано.</p>'}
+        <div class="buttons"><button data-close class="default">OK</button></div>`);
+      return;
+    }
+
+    let info = null;
+    try {
+      const curProj = project === "*" ? "" : project;
+      info = await api(`/api/chats?project=${encodeURIComponent(curProj)}`);
+    } catch (e) {
+      alertBox("Автопилот и живые чаты", e.message, "msg_error-0");
+      return;
+    }
+
+    const renderSessionsHtml = (sessions = []) => {
+      if (!sessions.length) {
+        return '<p class="sub">Сессий пока нет. Включите галочку «Читать живые чаты Antigravity и Codex» и нажмите «Сохранить», либо подключите хуки на второй вкладке.</p>';
+      }
+      return sessions.map((s) => {
+        const turns = (s.turns || []).slice(-4).map((t) => `<div class="chat-turn ${t.role === "user" ? "user" : "assistant"}"><span class="chat-role">${t.role === "user" ? "Запрос" : "Ответ"}:</span> ${esc(t.text)}</div>`).join("");
+        return `<div class="chat-session-box">
+          <div><b>${esc(s.agent || s.provider)}</b> · <code>${esc(s.provider)}</code>${s.project ? ` · проект <b>${esc(s.project)}</b>` : ""} · <span class="sub">сессия: <code>${esc(s.session_id)}</code> · ${esc(ago(s.updated_at))}</span></div>
+          ${turns || '<div class="sub">Нет текстовых реплик в хвосте журнала.</div>'}
+        </div>`;
+      }).join("");
+    };
+
+    const codexStatus = info.codex_probe?.binary_found
+      ? `<span class="ok">найден (${esc(info.codex_probe.version || "codex")})</span>`
+      : '<span class="sub">не найден на этом ПК</span>';
+    const sn = info.snippets || {};
+
+    dialog("Автопилот и живые чаты (Antigravity + Codex)", `
+      <menu role="tablist" aria-label="Разделы автопилота">
+        <li role="tab" data-ap-tab="live" aria-selected="true"><a href="#">Автопилот и лента чатов</a></li>
+        <li role="tab" data-ap-tab="hooks" aria-selected="false"><a href="#">Подключение без участия человека (хуки и wait)</a></li>
+      </menu>
+      <div class="window" role="tabpanel"><div class="window-body">
+        <div id="ap-panel-live">
+          <div class="field-row"><input type="checkbox" id="ap-enabled"${info.enabled ? " checked" : ""}><label for="ap-enabled"><b>Включить автопилот</b> — автоматически передавать задания и отчёты между агентами без ручного копирования</label></div>
+          <div class="field-row"><input type="checkbox" id="ap-watch"${info.watch_chats ? " checked" : ""}><label for="ap-watch">Читать живые чаты Antigravity и Codex на этом ПК в реальном времени (только чтение хвоста .jsonl, ключи скрываются)</label></div>
+          <div class="field-row"><input type="checkbox" id="ap-codex"${info.codex_cli_enabled ? " checked" : ""}><label for="ap-codex">Прямая постановка в очередь OpenAI Codex (<code>codex queue --resume</code> · статус: ${codexStatus})</label></div>
+          <div class="quiet-grid"><label for="ap-max-relays">Предел автопересылок подряд по одной задаче (защита от бесконечного цикла):</label><input type="number" id="ap-max-relays" min="1" max="50" value="${Number(info.max_relays_per_task) || 6}" style="width:64px"></div>
+          <div class="buttons" style="margin:6px 0 8px;justify-content:flex-start"><button type="button" id="ap-save" class="default">Сохранить настройки</button><button type="button" id="ap-refresh">Обновить чаты</button><span id="ap-status" class="sub" role="status"></span></div>
+          <h3>Живые сессии Antigravity и Codex (<span id="ap-count">${(info.sessions || []).length}</span>)</h3>
+          <div class="chat-list" id="ap-sessions">${renderSessionsHtml(info.sessions)}</div>
+        </div>
+        <div id="ap-panel-hooks" class="hidden">
+          <p>Три штатных способа полностью убрать ручной перенос сообщений между <b>Antigravity</b> и <b>Codex</b>:</p>
+          <p><b>1. Реактивное ожидание в фоне (работает сразу, без настройки файлов):</b> агент в конце хода запускает <code>wait</code> в фоне — расход токенов 0, чат просыпается сам в ту же секунду, когда напарник сдаёт отчёт или задание:</p>
+          <textarea readonly class="snippet-box" id="ap-snip-wait" style="height:44px !important"></textarea>
+          <p><b>2. Хук Antigravity (<code>${esc(sn.antigravity_hooks_path || ".agents/hooks.json")}</code>):</b> сам подхватывает входящие задания на <code>SessionStart</code> и продолжает ход на <code>Stop</code> (если Agent Desk закрыт — безопасно пропускает ход):</p>
+          <textarea readonly class="snippet-box" id="ap-snip-ag"></textarea>
+          <p><b>3. Хук OpenAI Codex (<code>${esc(sn.codex_hooks_path || ".codex/hooks.json")}</code>):</b> передаёт следующее задание при завершении хода Codex:</p>
+          <textarea readonly class="snippet-box" id="ap-snip-cx"></textarea>
+          <div class="buttons wrap" style="justify-content:flex-start"><button type="button" data-copy-snip="ap-snip-wait">Копировать команду wait</button><button type="button" data-copy-snip="ap-snip-ag">Копировать hooks.json (Antigravity)</button><button type="button" data-copy-snip="ap-snip-cx">Копировать hooks.json (Codex)</button></div>
+        </div>
+      </div></div>
+      <div class="buttons"><button data-close>Закрыть</button></div>`,
+    (node) => {
+      node.querySelector("#ap-snip-wait").value = sn.standby_command || "";
+      node.querySelector("#ap-snip-ag").value = sn.antigravity_hooks || "";
+      node.querySelector("#ap-snip-cx").value = sn.codex_hooks || "";
+
+      node.addEventListener("click", async (e) => {
+        const tabLi = e.target.closest("[data-ap-tab]");
+        if (tabLi) {
+          e.preventDefault();
+          const which = tabLi.dataset.apTab;
+          node.querySelectorAll("[data-ap-tab]").forEach((li) => li.setAttribute("aria-selected", String(li.dataset.apTab === which)));
+          node.querySelector("#ap-panel-live").classList.toggle("hidden", which !== "live");
+          node.querySelector("#ap-panel-hooks").classList.toggle("hidden", which !== "hooks");
+          return;
+        }
+        const copyBtn = e.target.closest("[data-copy-snip]");
+        if (copyBtn) {
+          const val = node.querySelector(`#${copyBtn.dataset.copySnip}`)?.value || "";
+          const prev = copyBtn.textContent;
+          copyBtn.textContent = (await copyText(val)) ? "Скопировано ✓" : "Не удалось";
+          setTimeout(() => { if (copyBtn.isConnected) copyBtn.textContent = prev; }, 1400);
+        }
+      });
+
+      const refreshChats = async () => {
+        const curProj = project === "*" ? "" : project;
+        const fresh = await api(`/api/chats?project=${encodeURIComponent(curProj)}`);
+        node.querySelector("#ap-count").textContent = String((fresh.sessions || []).length);
+        node.querySelector("#ap-sessions").innerHTML = renderSessionsHtml(fresh.sessions);
+      };
+
+      node.querySelector("#ap-refresh").onclick = async (e) => {
+        e.target.disabled = true;
+        try { await refreshChats(); } finally { if (e.target.isConnected) e.target.disabled = false; }
+      };
+
+      node.querySelector("#ap-save").onclick = async (e) => {
+        const btn = e.target;
+        const st = node.querySelector("#ap-status");
+        const maxRelays = Math.max(1, Math.min(50, Number(node.querySelector("#ap-max-relays").value) || 6));
+        btn.disabled = true;
+        st.textContent = "Сохраняю…";
+        try {
+          await api("/api/config", {
+            autopilot: {
+              enabled: node.querySelector("#ap-enabled").checked,
+              watch_chats: node.querySelector("#ap-watch").checked,
+              codex_cli_enabled: node.querySelector("#ap-codex").checked,
+              max_relays_per_task: maxRelays,
+            },
+          });
+          await poll();
+          await refreshChats();
+          st.textContent = "Сохранено ✓";
+        } catch (err) {
+          st.textContent = `Ошибка: ${err.message}`;
+        } finally {
+          if (btn.isConnected) btn.disabled = false;
+        }
+      };
+    }, { wide: true });
   },
   updates() {
     if (!data) return;
@@ -2803,6 +2946,7 @@ window.abPeers = () => { if (data && !document.querySelector("#peers-live")) ACT
 window.abNotifySettings = () => { if (data) notifySettingsDialog(); };
 window.abDiagnostics = () => { if (data) diagnosticsDialog(); };
 window.abUpdates = () => { if (data) ACTIONS.updates(); };
+window.abAutopilot = () => { if (data) ACTIONS.autopilot(); };
 
 // --- desktop app window (Electron: desktop/preload.js gives window.agentDesk) -----
 

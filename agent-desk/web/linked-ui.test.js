@@ -773,7 +773,7 @@ if (process.argv.includes("--serve")) {
     assert.ok(calls.some((c) => c.url === "/api/agents/rotate-session" && c.body.agent === "Claude Opus"));
   });
 
-  test("CP5 UI: agentPrompt lists active project registry agents, field limits, offline validate, and exposes tray hooks", () => {
+  test("CP5 UI: agentPrompt lists active project registry agents, field limits, offline validate, and exposes tray hooks", async () => {
     const state = fixture();
     state.config.agent_registry = {
       Demo: [
@@ -822,40 +822,51 @@ if (process.argv.includes("--serve")) {
     assert.match(cliWorker, /message_id — глобальный UUID/);
 
     // Update banner + Update dialog (Windows auto-install & Android APK prompt)
-    state.app = { version: "2.3.6" };
+    state.app = { version: "2.4.0" };
     state.update = {
       phase: "available",
       available: true,
-      current_version: "2.3.6",
-      latest_version: "2.3.7",
+      current_version: "2.4.0",
+      latest_version: "2.4.1",
       checked_at: new Date().toISOString(),
-      release_url: "https://github.com/purrfect0/AgentDesk/releases/tag/agent-desk-v2.3.7",
+      release_url: "https://github.com/purrfect0/AgentDesk/releases/tag/agent-desk-v2.4.1",
       notes: "- Автообновление Windows с проверкой SHA-256",
       can_auto_install: true,
-      win: { name: "AgentDesk-Setup-2.3.7.exe", size: 120000000, url: "https://github.com/purrfect0/AgentDesk/releases/download/agent-desk-v2.3.7/AgentDesk-Setup-2.3.7.exe", has_sha256: true },
-      apk: { name: "AgentDesk-2.3.7.apk", size: 27000000, url: "https://github.com/purrfect0/AgentDesk/releases/download/agent-desk-v2.3.7/AgentDesk-2.3.7.apk", has_sha256: true },
+      win: { name: "AgentDesk-Setup-2.4.1.exe", size: 120000000, url: "https://github.com/purrfect0/AgentDesk/releases/download/agent-desk-v2.4.1/AgentDesk-Setup-2.4.1.exe", has_sha256: true },
+      apk: { name: "AgentDesk-2.4.1.apk", size: 27000000, url: "https://github.com/purrfect0/AgentDesk/releases/download/agent-desk-v2.4.1/AgentDesk-Setup-2.4.1.apk", has_sha256: true },
     };
     const hUpd = harness(state);
     hUpd.run("render()");
     assert.equal(hUpd.root.querySelector("#update-banner").classList.contains("hidden"), false);
-    assert.match(hUpd.root.querySelector("#update-banner").innerHTML, /Доступно обновление Agent Desk 2\.3\.7/);
+    assert.match(hUpd.root.querySelector("#update-banner").innerHTML, /Доступно обновление Agent Desk 2\.4\.1/);
 
     hUpd.run("window.abUpdates()");
     const updDlg = hUpd.mounted.at(-1);
     assert.equal(updDlg.title, "Обновление Agent Desk");
-    assert.equal(updDlg.node.querySelector("#upd-primary").textContent, "Скачать и установить 2.3.7");
+    assert.equal(updDlg.node.querySelector("#upd-primary").textContent, "Скачать и установить 2.4.1");
     assert.match(updDlg.node.querySelector("#update-live").innerHTML, /Автообновление Windows/);
 
     hUpd.run('ACTIONS["dismiss-update"]()');
     assert.equal(hUpd.root.querySelector("#update-banner").classList.contains("hidden"), true);
 
-    // Even after PC updates to 2.3.7 (available=false on PC), an older mobile APK still sees APK update!
-    state.app = { version: "2.3.7" };
+    // Even after PC updates to 2.4.1 (available=false on PC), an older mobile APK still sees APK update!
+    state.app = { version: "2.4.1" };
     state.update.available = false;
-    state.update.current_version = "2.3.7";
+    state.update.current_version = "2.4.1";
     const hMob = harness(state);
     hMob.run('AD_HOST.kind = "mobile"; dismissedUpdate = ""; render(); ACTIONS.updates()');
     assert.equal(hMob.root.querySelector("#update-banner").classList.contains("hidden"), false);
-    assert.equal(hMob.mounted.at(-1).node.querySelector("#upd-primary").textContent, "Скачать APK (2.3.7)");
+    assert.equal(hMob.mounted.at(-1).node.querySelector("#upd-primary").textContent, "Скачать APK (2.4.1)");
+
+    // Autopilot status bar, auto_relayed_at & rework status labels, and mobile autopilot summary
+    state.config.autopilot = { enabled: true, watch_chats: true, codex_cli_enabled: false, max_relays_per_task: 6 };
+    state.autopilot = { enabled: true, max_relays_per_task: 6, sessions: [{ key: "ag:1", provider: "antigravity", agent: "Carbon", project: "Demo", updated_at: new Date().toISOString() }] };
+    const hAuto = harness(state);
+    hAuto.run("render()");
+    assert.match(hAuto.root.querySelector("#sb-counts").textContent, /автопилот вкл\./);
+    assert.match(hAuto.run('todoStatus({ kind: "forward", purpose: "rework" })'), /не переслана доработка/);
+    assert.match(hAuto.run('todoStatus({ kind: "forward", auto_relayed_at: new Date().toISOString(), to: "Codex" })'), /автопилот передал/);
+    await hMob.run("window.abAutopilot()");
+    assert.match(hMob.mounted.at(-1).title, /Автопилот/);
   });
 }

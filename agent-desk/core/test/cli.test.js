@@ -70,6 +70,9 @@ test("all ten client commands use scoped agent routes and the separate key", asy
     context: { id: "task-uuid" }, assign: { task_id: "task-uuid", assignment: { agent: "B", device_id: "d", session_id: "s" } },
     transition: { task_id: "task-uuid", state: "working", assignment_epoch: 4, session_id: "s" },
     coordinate: { task_id: "task-uuid", target_device_id: "d2", assignment_epoch: 4 },
+    bind: { project: "P", agent: "Lead", session_id: "lead-s", role: "coordinator" },
+    wait: { project: "P", agent: "B", session_id: "s", wait: "5" },
+    hook: { provider: "antigravity", agent: "Carbon", hook: { hookEventName: "Stop" } },
   };
   for (const [name, spec] of Object.entries(COMMANDS)) {
     await client.execute(name, bodies[name]);
@@ -289,12 +292,16 @@ test("MCP registers eleven tools including offline validate and uses the same au
   const tools = new Map();
   const server = { registerTool: (name, spec, handler) => tools.set(name, { spec, handler }) };
   assert.equal(registerAgentTools(server, client, mockZod()), server);
-  assert.equal(tools.size, 11);
-  for (const name of Object.keys(COMMANDS)) {
+  assert.equal(tools.size, 13);
+  for (const name of Object.keys(COMMANDS).filter((k) => k !== "hook")) {
     const tool = tools.get(`agent_desk_${name}`);
     assert.ok(tool);
     assert.equal(tool.spec.annotations.readOnlyHint, COMMANDS[name].method === "GET");
-    const input = ["read", "context"].includes(name) ? { id: "uuid" } : name === "status" ? {} : name === "inbox" ? { project: "P" } : { task_id: "uuid", session_id: "s", assignment_epoch: 4, checkpoint: { next_step: "review" } };
+    const input = ["read", "context"].includes(name) ? { id: "uuid" }
+      : name === "status" ? {}
+      : ["inbox", "wait"].includes(name) ? { project: "P" }
+      : name === "bind" ? { project: "P", agent: "Lead", session_id: "s", role: "coordinator" }
+      : { task_id: "uuid", session_id: "s", assignment_epoch: 4, checkpoint: { next_step: "review" } };
     const result = await tool.handler(input);
     assert.equal(result.isError, undefined);
     assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent);
@@ -382,7 +389,7 @@ test("official SDK stdio list/call smoke with only synthetic loopback HTTP", { s
   try {
     await client.connect(transport);
     const listed = await client.listTools();
-    assert.equal(listed.tools.length, 11);
+    assert.equal(listed.tools.length, 13);
     const valRes = await client.callTool({ name: "agent_desk_validate", arguments: { project: "P", agent: "A", state: "working" } });
     assert.equal(valRes.structuredContent.ok, true);
     assert.equal(calls.length, 0);

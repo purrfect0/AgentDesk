@@ -25,6 +25,9 @@ node core/cli.js assign --file assignment.json
 node core/cli.js transition --file transition.json
 node core/cli.js handoff --file handoff.json
 node core/cli.js coordinate --file coordinate.json
+node core/cli.js bind --project Example --agent Lead --session-id lead-1 --role coordinator
+node core/cli.js wait --project Example --agent Astra --wait-seconds 1800
+node core/cli.js hook --provider antigravity --agent Carbon --project Example
 ```
 
 JSON input: pipe one object to stdin, supply `--stdin`, use `--file FILE`, or `--json '{...}'`. Choose one input source. In an interactive terminal, omitted input means an empty object; redirected stdin is read until EOF. Field flags override JSON fields. `read` and `context` also accept `--id UUID`. Unknown/duplicate flags and unsupported GET fields fail rather than being silently ignored.

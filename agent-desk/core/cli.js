@@ -10,11 +10,14 @@ const HELP = {
   commands: [...Object.keys(COMMANDS), "validate"],
   notes: [
     "JSON is read from piped stdin automatically unless --file or --json is supplied. Flags override JSON fields.",
-    "Use --id or a positional UUID for read/context. Use --message-id for ack.",
+    "Use --id or a positional UUID for read/context; --message-id or a positional UUID for ack.",
     "validate runs offline against the shared marker schema (no running server or config needed) and returns structured field hints.",
+    "bind registers an explicit coordinator/reviewer session binding without creating a dummy task.",
+    "wait long-polls for un-acknowledged inbox messages (--wait-seconds up to 3600) so sleeping agents wake immediately on arrival.",
+    "hook integrates with Antigravity (.agents/hooks.json) and Codex (.codex/hooks.json) lifecycle hooks and fails open if Agent Desk is closed.",
     "coordinate transfers or reclaims task coordination between paired desks.",
     "Hyphenated field flags map to snake_case. --checkpoint, --artifacts, --assignment, --binding, --manifest, --constraints, --skills and --ack accept JSON.",
-    "--needs-forward [true|false] is boolean; --seq and --assignment-epoch are integers. --timeout is milliseconds.",
+    "--needs-forward and --self-started [true|false] are boolean; --seq, --assignment-epoch and --wait-seconds are integers. --timeout is milliseconds.",
     "Errors are JSON on stdout with a nonzero exit code. ACK is a receipt, not task acceptance/completion.",
     "assign accepts --prompt (max 20000 characters) or JSON prompt/message. Use --file or --stdin for multiline text. Read the returned assignment_message_id to copy or resend without reassigning.",
     "The agent key is read only from config.json; no --key option and no state.json writes.",
@@ -24,20 +27,21 @@ const GLOBALS = new Set(["home", "server", "file", "json", "timeout"]);
 const FIELDS = new Set([
   "id", "request_id", "project", "project_id", "agent", "session_id", "message_id", "task_id", "event_id", "seq",
   "state", "execution_state", "assignment_epoch", "epoch", "previous_session_id", "previous_device_id", "device_id", "coordinator_device_id", "target_device_id", "origin_device_id", "delivery_target", "role", "adapter",
-  "title", "task", "prompt", "to", "from", "phase", "waiting_for", "note", "reason", "result", "message", "ref", "needs_forward", "ack",
+  "title", "task", "prompt", "to", "from", "phase", "waiting_for", "note", "reason", "result", "message", "ref", "needs_forward", "self_started", "ack",
+  "provider", "wait_seconds", "wait",
   "checkpoint", "artifacts", "assignment", "binding", "repo", "branch", "commit", "report", "manifest", "next_step", "constraints", "skills",
 ]);
 const JSON_FIELDS = new Set(["checkpoint", "artifacts", "assignment", "binding", "manifest", "constraints", "skills"]);
 
 function fieldValue(name, value) {
-  if (["assignment_epoch", "epoch", "seq"].includes(name)) {
+  if (["assignment_epoch", "epoch", "seq", "wait_seconds"].includes(name)) {
     if (!/^-?\d+$/.test(value) || !Number.isSafeInteger(Number(value))) {
       throw new AgentClientError("INVALID_ARGUMENT", `${name} must be a safe integer.`);
     }
     return Number(value);
   }
-  if (name === "needs_forward") {
-    if (!["true", "false"].includes(value)) throw new AgentClientError("INVALID_ARGUMENT", "needs_forward must be true or false.");
+  if (name === "needs_forward" || name === "self_started") {
+    if (!["true", "false"].includes(value)) throw new AgentClientError("INVALID_ARGUMENT", `${name} must be true or false.`);
     return value === "true";
   }
   if (JSON_FIELDS.has(name) || (name === "ack" && value.trim().startsWith("["))) {
@@ -78,7 +82,7 @@ function parseArguments(argv, { mcp = false } = {}) {
     seen.add(name);
     let value = equal < 0 ? undefined : token.slice(equal + 1);
     if (value === undefined) {
-      if (name === "needs_forward" && (i + 1 >= argv.length || argv[i + 1].startsWith("--"))) value = "true";
+      if ((name === "needs_forward" || name === "self_started") && (i + 1 >= argv.length || argv[i + 1].startsWith("--"))) value = "true";
       else {
         value = argv[++i];
         if (value === undefined || value.startsWith("--")) throw new AgentClientError("INVALID_ARGUMENT", "Option requires a value (use --field=value for values beginning with --).");
@@ -98,13 +102,16 @@ function parseArguments(argv, { mcp = false } = {}) {
   const command = positions.shift();
   if (command === "help") help = true;
   if (!help && (!command || (!Object.hasOwn(COMMANDS, command) && command !== "validate"))) {
-    throw new AgentClientError("UNKNOWN_COMMAND", "Choose inbox, read, ack, submit, status, handoff, context, assign, transition, coordinate or validate; use --help.");
+    throw new AgentClientError("UNKNOWN_COMMAND", "Choose inbox, read, ack, submit, status, handoff, context, assign, transition, coordinate, bind, wait, hook or validate; use --help.");
   }
   if (positions.length) {
-    if (!["read", "context"].includes(command) || positions.length !== 1 || fields.id !== undefined) {
-      throw new AgentClientError("INVALID_ARGUMENT", "Only read/context accept one positional id.");
+    if (["read", "context"].includes(command) && positions.length === 1 && fields.id === undefined) {
+      fields.id = positions[0];
+    } else if (command === "ack" && positions.length === 1 && fields.message_id === undefined) {
+      fields.message_id = positions[0];
+    } else {
+      throw new AgentClientError("INVALID_ARGUMENT", "Only read/context/ack accept one positional id.");
     }
-    fields.id = positions[0];
   }
   if ([options.file !== undefined, options.json !== undefined, options.stdin === true].filter(Boolean).length > 1) {
     throw new AgentClientError("INVALID_ARGUMENT", "Choose only one of --file, --json and --stdin.");
@@ -142,9 +149,35 @@ async function readInput(options, stdin) {
 }
 
 async function runCli(argv = process.argv.slice(2), { stdin = process.stdin, stdout = process.stdout } = {}) {
+  let parsedCommand = "";
+  let parsedProvider = "";
   try {
     const { command, options, fields, help } = parseArguments(argv);
+    parsedCommand = command || "";
+    parsedProvider = String(fields?.provider || "").toLowerCase();
     if (help) { stdout.write(`${JSON.stringify(HELP)}\n`); return 0; }
+    if (command === "hook") {
+      // Fail-open lifecycle hook: never break an agent turn if Agent Desk is closed or stdin is empty.
+      try {
+        const rawHook = await readInput(options, stdin);
+        const client = new AgentClient({ ...options, timeout: options.timeout || 4000 });
+        const value = await client.execute("hook", {
+          provider: fields.provider || "",
+          agent: fields.agent || "",
+          project: fields.project || "",
+          session_id: fields.session_id || "",
+          hook: rawHook,
+        });
+        if (value && value.hook_stdout !== null && value.hook_stdout !== undefined) {
+          stdout.write(`${JSON.stringify(value.hook_stdout)}\n`);
+        } else if (parsedProvider === "antigravity") {
+          stdout.write("{}\n");
+        }
+      } catch {
+        if (parsedProvider === "antigravity") stdout.write("{}\n");
+      }
+      return 0;
+    }
     const input = { ...await readInput(options, stdin), ...fields };
     if (command === "validate") {
       const diag = diagnoseMarker(input, fields.project || "");
@@ -156,11 +189,33 @@ async function runCli(argv = process.argv.slice(2), { stdin = process.stdin, std
       stdout.write(`${JSON.stringify(out)}\n`);
       return diag.ok ? 0 : 1;
     }
+    if (command === "wait") {
+      const totalWaitSec = Math.max(0, Math.min(3600, Number(input.wait_seconds ?? input.wait ?? 60) || 0));
+      const queryBase = {};
+      for (const k of ["project", "agent", "session_id"]) {
+        if (typeof input[k] === "string" && input[k].trim()) queryBase[k] = input[k].trim();
+      }
+      const deadline = Date.now() + (totalWaitSec * 1000);
+      let lastRes = null;
+      do {
+        const remSec = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+        const sliceSec = Math.min(25, remSec);
+        const sliceClient = new AgentClient({ ...options, timeout: Math.min(120000, Math.max(options.timeout || 0, (sliceSec + 10) * 1000)) });
+        lastRes = await sliceClient.execute("wait", { ...queryBase, ...(sliceSec > 0 ? { wait: String(sliceSec) } : {}) });
+        if (lastRes?.arrived || sliceSec === 0) break;
+      } while (Date.now() < deadline);
+      stdout.write(`${JSON.stringify(lastRes)}\n`);
+      return 0;
+    }
     const client = new AgentClient(options);
     const value = await client.execute(command, input);
     stdout.write(`${JSON.stringify(value)}\n`);
     return 0;
   } catch (error) {
+    if (parsedCommand === "hook") {
+      if (parsedProvider === "antigravity") stdout.write("{}\n");
+      return 0;
+    }
     stdout.write(`${JSON.stringify(errorResult(error))}\n`);
     return 1;
   }

@@ -17,6 +17,8 @@ const DESCRIPTIONS = Object.freeze({
   assign: "Assign on the coordinator device with title, full prompt (max 20000 characters) and recipient agent/device/session/role/adapter. Creates an owner-queue message; returns assignment_message_id for read/ACK. Assigning or copying is not delivery. Do not repeat assign to resend: read the existing assignment_message_id.",
   transition: "Transition task execution state independently of mailbox receipts. Send task_id, assignment_epoch and session_id; do not treat ACK as accepted/done.",
   coordinate: "Transfer or reclaim coordinator authority for a task across paired Agent Desk devices.",
+  bind: "Register an explicit coordinator, reviewer, or worker session binding for a project without creating a dummy task.",
+  wait: "Long-poll up to 25 seconds per call for un-acknowledged inbox messages addressed to an agent/project/session.",
   validate: "Validate an agent marker offline against the shared Agent Desk schema (state, waiting_for, field limits, checkpoint keys) without network or state writes.",
 });
 
@@ -33,6 +35,7 @@ function toolSchemas(z) {
     prompt: z.string().min(1).max(20000).optional(), message: z.string().min(1).max(20000).optional(),
     agent: optionalText(), device_id: optionalText(), session_id: optionalText(), role: optionalText(), adapter: optionalText(),
     assignment_epoch: epoch(), previous_session_id: optionalText(), previous_device_id: optionalText(), state: optionalText(), execution_state: optionalText(),
+    self_started: z.boolean().optional(),
     assignment: assignment(), binding: metadata(), checkpoint: metadata(), artifacts: z.array(z.unknown()).optional(),
   }).passthrough();
   return {
@@ -57,6 +60,13 @@ function toolSchemas(z) {
       task_id: optionalText(), id: optionalText(), target_device_id: optionalText(), coordinator_device_id: optionalText(),
       assignment_epoch: epoch(), request_id: optionalText(), note: z.string().max(1000).optional(),
     }).passthrough(),
+    bind: z.object({
+      project: text(), agent: text(), session_id: text(),
+      device_id: optionalText(), role: optionalText(), adapter: optionalText(),
+    }).passthrough(),
+    wait: z.object({
+      project: optionalText(), agent: optionalText(), session_id: optionalText(), wait: optionalText(),
+    }).strict(),
     validate: z.object({
       project: optionalText(), agent: optionalText(), state: optionalText(), waiting_for: optionalText(),
       execution_state: optionalText(), task_id: optionalText(), project_id: optionalText(), session_id: optionalText(),
@@ -87,7 +97,7 @@ async function callAgentTool(client, command, args = {}) {
 function registerAgentTools(server, client, z) {
   const schemas = toolSchemas(z);
   for (const [command, description] of Object.entries(DESCRIPTIONS)) {
-    const readOnly = ["inbox", "read", "status", "context", "validate"].includes(command);
+    const readOnly = ["inbox", "read", "status", "context", "wait", "validate"].includes(command);
     server.registerTool(`agent_desk_${command}`, {
       title: `Agent Desk: ${command}`,
       description,
@@ -125,7 +135,7 @@ async function startMcp(options = {}) {
 async function main() {
   const { options, help } = parseArguments(process.argv.slice(2), { mcp: true });
   if (help) {
-    process.stderr.write("Agent Desk MCP: node core/mcp.js [--home DIR] [--server LOOPBACK_HTTP_ORIGIN] [--timeout MS]\nTools: agent_desk_{inbox,read,ack,submit,status,handoff,context,assign,transition,coordinate,validate}\n");
+    process.stderr.write("Agent Desk MCP: node core/mcp.js [--home DIR] [--server LOOPBACK_HTTP_ORIGIN] [--timeout MS]\nTools: agent_desk_{inbox,read,ack,submit,status,handoff,context,assign,transition,coordinate,bind,wait,validate}\n");
     return;
   }
   const server = await startMcp(options);

@@ -178,6 +178,11 @@ function showUpdates() {
   win.webContents.executeJavaScript("window.abUpdates && window.abUpdates()").catch(() => {});
 }
 
+function showAutopilot() {
+  showMain();
+  win.webContents.executeJavaScript("window.abAutopilot && window.abAutopilot()").catch(() => {});
+}
+
 // --- tray --------------------------------------------------------------------------
 
 let lastTrayUpdateTag = "";
@@ -198,6 +203,7 @@ function rebuildTrayMenu(force = false) {
   const updLabel = upd?.available ? `Доступно обновление ${upd.latest_version}…` : "Проверить обновления…";
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "Открыть Agent Desk", click: () => showMain() },
+    { label: "Автопилот и живые чаты…", click: () => showAutopilot() },
     { label: "Другие компьютеры…", click: () => showPeers() },
     { label: "Тихие часы и уведомления…", click: () => showNotifySettings() },
     { label: "Диагностика и отказы…", click: () => showDiagnostics() },

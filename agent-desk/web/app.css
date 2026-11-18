@@ -279,6 +279,13 @@ tr.group td {
 .update-banner > span { flex: 1; min-width: 0; }
 .update-progress { margin: 8px 0 4px; }
 .update-notes { max-height: 150px; min-height: 60px; font-family: inherit; font-size: inherit; }
+.chat-list { max-height: 260px; overflow: auto; background: #fff; padding: 6px; box-shadow: inset -1px -1px #fff, inset 1px 1px grey, inset -2px -2px #dfdfdf, inset 2px 2px #0a0a0a; }
+.chat-session-box { margin: 0 0 8px; padding: 0 0 8px; border-bottom: 1px solid #808080; }
+.chat-session-box:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: 0; }
+.chat-turn { margin: 4px 0; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }
+.chat-turn .chat-role { font-weight: bold; color: navy; }
+.chat-turn.user .chat-role { color: #555; }
+.snippet-box { height: 96px !important; margin: 4px 0 6px; }
 td .peer-note .bad { color: #a00000; }
 table.interactive > tbody > tr.highlighted td .peer-note .bad { color: #ffd0d0; }
 
