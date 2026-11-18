@@ -7,7 +7,7 @@ const path = require("node:path");
 const http = require("node:http");
 const crypto = require("node:crypto");
 const { Desk, VERSION } = require("../desk.js");
-const { parseSemver, compareSemver } = require("../updater.js");
+const { parseSemver, compareSemver, CHECK_INTERVAL_MS } = require("../updater.js");
 
 const tempDirs = [];
 const servers = [];
@@ -47,7 +47,8 @@ async function postJson(baseUrl, pathname, body, headers = {}) {
 }
 
 describe("Built-in GitHub Release Updater & SHA-256 Self-Update", () => {
-  it("compares semver tags accurately", () => {
+  it("compares semver tags accurately and defaults to 30-minute background interval", () => {
+    assert.equal(CHECK_INTERVAL_MS, 30 * 60 * 1000);
     assert.deepEqual(parseSemver("agent-desk-v2.3.6"), [2, 3, 6]);
     assert.deepEqual(parseSemver("v2.10.0"), [2, 10, 0]);
     assert.equal(parseSemver("invalid"), null);

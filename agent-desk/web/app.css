@@ -286,6 +286,9 @@ tr.group td {
 .chat-turn .chat-role { font-weight: bold; color: navy; }
 .chat-turn.user .chat-role { color: #555; }
 .snippet-box { height: 96px !important; margin: 4px 0 6px; }
+.onboard-box { background: #fff; border: 1px solid #808080; padding: 8px; margin: 6px 0; }
+.onboard-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.onboard-footer .buttons { margin-top: 0; }
 td .peer-note .bad { color: #a00000; }
 table.interactive > tbody > tr.highlighted td .peer-note .bad { color: #ffd0d0; }
 

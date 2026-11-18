@@ -16,7 +16,7 @@ const { AdapterRegistry } = require("./adapters.js");
 const { UpdateManager } = require("./updater.js");
 const { ChatBridge } = require("./bridge.js");
 
-const VERSION = "2.4.0"; // the app version, the same as in package.json (a test checks it)
+const VERSION = "2.4.1"; // the app version, the same as in package.json (a test checks it)
 const PROTOCOL = 3;
 const STATES = new Set(["working", "waiting", "done", "blocked", "idle"]);
 const WAITING_FOR = new Set([

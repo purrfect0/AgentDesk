@@ -58,7 +58,7 @@ let seenAlerts = null;
 let online = true;
 let lastUpdated = null;
 let dialogReturnFocus = null;
-const CLIENT_VERSION = "2.4.0";
+const CLIENT_VERSION = "2.4.1";
 let phoneNotify = localStorage.getItem("ad.phoneNotify") !== "0";
 let dismissedUpdate = localStorage.getItem("ad.dismissUpdate") || "";
 
@@ -2113,6 +2113,257 @@ const ACTIONS = {
     }
     renderUpdateBanner();
   },
+  onboarding(initialStep = 0) {
+    if (!data) return;
+    if (document.querySelector("#onboard-root")?.dataset?.open === "1") return;
+    try { localStorage.setItem("ad.onboarded", "1"); } catch { /* ignore */ }
+
+    const isPhone = AD_HOST.kind === "mobile";
+    const canAdmin = isLocal && !isPhone;
+    let step = Number.isInteger(initialStep) && initialStep >= 0 && initialStep <= 3 ? initialStep : 0;
+    let promptRole = "lead";
+    let pairData = null;
+
+    const ap = data.config?.autopilot || {};
+    const mailOn = Boolean(data.config?.file_sync_enabled || data.mail?.enabled);
+    const lanOn = Boolean(data.link?.lan ?? data.config?.lan);
+    const devName = data.link?.name || data.host || "Компьютер";
+    const peerCount = (data.link?.peers || []).length;
+
+    dialog("Добро пожаловать — Быстрый старт и настройка Agent Desk", `
+      <div id="onboard-root" data-open="1">
+        <p class="sub" style="margin:0 0 6px">Четыре коротких шага: что дать агенту, как устроены очередь и почта, как связать компьютеры и подключить телефон. Открыть повторно можно в «Справка → Быстрый старт и настройка…».</p>
+        <menu role="tablist" aria-label="Шаги настройки">
+          <li role="tab" data-ob-step="0" aria-selected="true"><a href="#">1. Что дать агенту</a></li>
+          <li role="tab" data-ob-step="1" aria-selected="false"><a href="#">2. Очередь и почта</a></li>
+          <li role="tab" data-ob-step="2" aria-selected="false"><a href="#">3. Второй ПК</a></li>
+          <li role="tab" data-ob-step="3" aria-selected="false"><a href="#">4. Телефон</a></li>
+        </menu>
+        <div class="window" role="tabpanel"><div class="window-body">
+          <div data-ob-panel="0">
+            <p><b>С чего начать работу:</b> вам не нужно создавать карточки и прописывать идентификаторы вручную. Скопируйте готовый промпт ниже и вставьте его новому ведущему агенту (в Antigravity или OpenAI Codex) — он сам подключится к установленному Agent Desk через локальный CLI/MCP, осмотрит проект, заведёт задачи и поведёт исполнителей.</p>
+            <div class="buttons wrap" style="margin:4px 0 6px;justify-content:flex-start">
+              <button type="button" data-ob-role="lead" class="default">Промпт начальнику проекта (универсальный)</button>
+              <button type="button" data-ob-role="worker">Памятка рядовому исполнителю</button>
+              <button type="button" id="ob-copy-prompt">Копировать промпт</button>
+            </div>
+            <textarea readonly id="ob-prompt" style="height:150px"></textarea>
+            ${canAdmin ? `<div class="onboard-box">
+              <div class="field-row"><input type="checkbox" id="ob-ap-enabled"${ap.enabled ? " checked" : ""}><label for="ob-ap-enabled"><b>Включить Автопилот</b> — автоматически передавать задания и отчёты между агентами без ручного копирования (стоп-кран после ${esc(ap.max_relays_per_task || 6)} передач подряд)</label></div>
+              <div class="field-row" style="margin-top:4px"><input type="checkbox" id="ob-ap-watch"${ap.watch_chats ? " checked" : ""}><label for="ob-ap-watch">Показывать живые чаты Antigravity и Codex на этом ПК (ключи скрываются автоматически)</label></div>
+            </div>` : ""}
+          </div>
+
+          <div data-ob-panel="1" class="hidden">
+            <ul class="checklist">
+              <li><b>Очередь «Нужно сделать»:</b> показывает только то, где нужно ваше действие («Переслать задание», «Переслать отчёт», «Ответить», «Проверить сдачу»). После пересылки карточка тихо ждёт квитанцию <code>ACK</code> от агента.</li>
+              <li><b>Честный учёт во вкладке «Задачи»:</b> у каждой работы один сквозной номер карточки. Копирование текста не означает получение (<code>ACK</code>), а <code>ACK</code> не означает готовность. При возврате на доработку (<code>rework</code>) замечания сами превращаются в новое сообщение исполнителю, а при приёмке (<code>accepted</code>) старые напоминания закрываются автоматически.</li>
+              <li><b>Папки и общая почта между ПК:</b>
+                <br>· Агентам на этом ПК (Antigravity, Codex) папки не нужны — они работают напрямую через штатный CLI и MCP.
+                <br>· <b>Папки с маркерами</b> нужны только сторонним агентам без CLI, которые пишут <code>.json</code>-файлы на диск.
+                <br>· <b>Общая почта проектов</b> автоматически переносит готовые файлы отчётов (до 8 МиБ, с проверкой <code>SHA-256</code>) между двумя связанными компьютерами без перезаписи при конфликте.</li>
+            </ul>
+            ${canAdmin ? `<div class="onboard-box">
+              <div class="field-row"><input type="checkbox" id="ob-mail-enabled"${mailOn ? " checked" : ""}><label for="ob-mail-enabled">Включить автоматический приём и синхронизацию файлов общей почты между связанными ПК</label></div>
+              <div class="buttons wrap" style="margin-top:8px;justify-content:flex-start">
+                <button type="button" id="ob-open-folders">Папки с маркерами…</button>
+                <button type="button" id="ob-open-mail-roots">Общие папки почты…</button>
+              </div>
+            </div>` : ""}
+          </div>
+
+          <div data-ob-panel="2" class="hidden">
+            <p><b>Как связать настольный ПК и ноутбук в одной Wi-Fi сети:</b></p>
+            <ol class="checklist">
+              <li>Установите одинаковую версию Agent Desk на оба компьютера и разрешите доступ в брандмауэре Windows для <b>частных сетей</b> (используются порты TCP <code>8098</code> и UDP <code>8099</code>).</li>
+              <li>Включите <b>Доступ из Wi-Fi</b> на обоих компьютерах и откройте <b>«Другие компьютеры…»</b> — узлы одной сети найдут друг друга автоматически (также можно ввести IP вручную).</li>
+              <li>Нажмите «Подключить», сверьте <b>4-значный код</b> на обоих экранах и нажмите «Разрешить». Карточки, задачи и квитанции начнут синхронизироваться по защищённому каналу <code>AES-256-GCM</code>.</li>
+            </ol>
+            ${canAdmin ? `<div class="onboard-box">
+              <p style="margin:0 0 6px">Доступ из Wi-Fi на этом ПК: <b id="ob-lan-state" class="${lanOn ? "ok" : "bad"}">${lanOn ? "включён ✓" : "выключен"}</b> · Подключено компьютеров: <b>${peerCount}</b></p>
+              <div class="field-row" style="margin-bottom:6px">
+                <label for="ob-pc-name">Имя этого ПК:</label>
+                <input type="text" id="ob-pc-name" maxlength="60" value="${esc(devName)}" style="max-width:220px">
+                <button type="button" id="ob-save-pc-name">Сохранить имя</button>
+                ${lanOn ? "" : '<button type="button" id="ob-enable-lan">Включить доступ из Wi-Fi</button>'}
+              </div>
+              <div class="buttons wrap" style="margin-top:6px;justify-content:flex-start">
+                <button type="button" id="ob-open-peers">Найти и подключить компьютер…</button>
+                <span id="ob-peer-msg" class="sub"></span>
+              </div>
+            </div>` : `<p class="sub">Настройка связи компьютеров выполняется непосредственно на ПК в меню «Файл → Другие компьютеры…».</p>`}
+          </div>
+
+          <div data-ob-panel="3" class="hidden">
+            ${canAdmin ? `<p><b>Как подключить телефон Android (очередь на экране + мгновенные уведомления в фоне):</b></p>
+            <ol class="checklist">
+              <li>Скачайте и установите <code>AgentDesk-*.apk</code> на телефон из релизов GitHub (кнопка ниже).</li>
+              <li>Подключите телефон к тому же домашнему Wi-Fi, откройте приложение, нажмите <b>«Сканировать QR-код»</b> и наведите камеру на код ниже.</li>
+              <li>На оболочках Xiaomi, Honor, Huawei, OPPO, vivo, RedMagic и Nubia включите для приложения <b>Автозапуск</b>, батарею <b>«Без ограничений»</b> и закрепите его замком в списке недавних.</li>
+            </ol>
+            <div class="onboard-box" id="ob-phone-box">
+              <div class="qr-row">
+                <div class="qr hidden" id="ob-qr"><img alt="QR-код подключения телефона"></div>
+                <div class="qr-links">
+                  <div id="ob-pair-status" class="sub">Загружаю ссылку подключения…</div>
+                  <p class="select-all hidden" id="ob-pair-url"></p>
+                  <div class="buttons wrap" style="margin-top:6px;justify-content:flex-start">
+                    <button type="button" id="ob-copy-pair" disabled>Копировать ссылку</button>
+                    <button type="button" id="ob-dl-apk">Скачать APK на GitHub</button>
+                    <button type="button" id="ob-quiet">Тихие часы…</button>
+                  </div>
+                </div>
+              </div>
+            </div>` : `<p><b>Этот телефон подключён к Agent Desk!</b></p>
+            <p>Чтобы уведомления в стиле Windows 98 со звуком приложения приходили за секунду даже при выключенном экране, разрешите уведомления, отключите экономию батареи для Agent Desk и включите <b>Автозапуск</b> в настройках оболочки.</p>
+            <div class="buttons wrap" style="justify-content:flex-start">
+              ${isPhone ? '<button type="button" id="ob-phone-settings" class="default">Проверить уведомления и батарею…</button>' : ""}
+            </div>`}
+          </div>
+        </div></div>
+
+        <div class="onboard-footer">
+          <span class="sub" id="ob-step-indicator">Шаг 1 из 4</span>
+          <div class="buttons">
+            <button type="button" id="ob-prev">← Назад</button>
+            <button type="button" id="ob-next" class="default">Далее →</button>
+            <button type="button" data-close>Закрыть</button>
+          </div>
+        </div>
+      </div>`,
+    (node, close) => {
+      const promptTa = node.querySelector("#ob-prompt");
+      const copyPromptBtn = node.querySelector("#ob-copy-prompt");
+      const prevBtn = node.querySelector("#ob-prev");
+      const nextBtn = node.querySelector("#ob-next");
+      const indicator = node.querySelector("#ob-step-indicator");
+
+      const refreshPrompt = () => {
+        const target = howtoTargets()[0] || {};
+        promptTa.value = promptRole === "lead" ? leadPrompt(target) : agentPrompt(target);
+        node.querySelectorAll("[data-ob-role]").forEach((b) => b.classList.toggle("default", b.dataset.obRole === promptRole));
+        copyPromptBtn.textContent = "Копировать промпт";
+      };
+
+      const loadPhoneQr = async () => {
+        if (!canAdmin || pairData) return;
+        const stEl = node.querySelector("#ob-pair-status");
+        const urlEl = node.querySelector("#ob-pair-url");
+        const copyBtn = node.querySelector("#ob-copy-pair");
+        const qrBox = node.querySelector("#ob-qr");
+        try {
+          pairData = await api("/api/pairing");
+          const link = pairData.urls?.[0] || pairData.url || "";
+          if (!pairData.lan) {
+            stEl.innerHTML = '<b class="bad">Доступ из Wi-Fi сейчас выключен</b> — включите его на шаге 3 или в «Файл → Подключить телефон…», чтобы телефон увидел ПК.';
+          } else {
+            stEl.textContent = "Наведите камеру из приложения на телефоне или перешлите себе ссылку:";
+          }
+          if (link) {
+            urlEl.textContent = link;
+            urlEl.classList.remove("hidden");
+            copyBtn.disabled = false;
+            copyBtn.onclick = async () => {
+              copyBtn.textContent = (await copyText(link)) ? "Скопировано ✓" : "Не удалось";
+            };
+            if (window.agentDesk?.qr) {
+              const svg = await window.agentDesk.qr(link);
+              if (svg && node.isConnected) {
+                qrBox.querySelector("img").src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+                qrBox.classList.remove("hidden");
+              }
+            }
+          }
+        } catch (e) {
+          if (stEl) stEl.textContent = `Не удалось получить ссылку: ${e.message}`;
+        }
+      };
+
+      const showStep = (idx) => {
+        step = Math.max(0, Math.min(3, idx));
+        node.querySelectorAll("[data-ob-step]").forEach((li) => li.setAttribute("aria-selected", String(Number(li.dataset.obStep) === step)));
+        node.querySelectorAll("[data-ob-panel]").forEach((p) => p.classList.toggle("hidden", Number(p.dataset.obPanel) !== step));
+        indicator.textContent = `Шаг ${step + 1} из 4`;
+        prevBtn.disabled = step === 0;
+        nextBtn.textContent = step === 3 ? "Готово ✓" : "Далее →";
+        if (step === 3) loadPhoneQr();
+      };
+
+      refreshPrompt();
+      showStep(step);
+
+      node.addEventListener("click", (e) => {
+        const sTab = e.target.closest("[data-ob-step]");
+        if (sTab) { e.preventDefault(); showStep(Number(sTab.dataset.obStep)); return; }
+        const rBtn = e.target.closest("[data-ob-role]");
+        if (rBtn) { e.preventDefault(); promptRole = rBtn.dataset.obRole; refreshPrompt(); }
+      });
+
+      copyPromptBtn.onclick = async () => {
+        copyPromptBtn.textContent = (await copyText(promptTa.value)) ? "Скопировано ✓" : "Не удалось";
+      };
+      prevBtn.onclick = () => showStep(step - 1);
+      nextBtn.onclick = () => {
+        if (step < 3) showStep(step + 1);
+        else close();
+      };
+
+      if (canAdmin) {
+        const saveAp = () => {
+          const cur = data.config?.autopilot || {};
+          act("/api/config", {
+            autopilot: {
+              ...cur,
+              enabled: node.querySelector("#ob-ap-enabled").checked,
+              watch_chats: node.querySelector("#ob-ap-watch").checked,
+            },
+          });
+        };
+        node.querySelector("#ob-ap-enabled")?.addEventListener("change", saveAp);
+        node.querySelector("#ob-ap-watch")?.addEventListener("change", saveAp);
+
+        node.querySelector("#ob-mail-enabled")?.addEventListener("change", async (e) => {
+          const on = e.target.checked;
+          try {
+            await api("/api/mail/config", on ? { automatic: true, enabled: true } : { enabled: false });
+            await poll();
+          } catch (err) {
+            alertBox("Общая почта", err.message, "msg_error-0");
+          }
+        });
+        node.querySelector("#ob-open-folders")?.addEventListener("click", () => { close(); ACTIONS.folders(); });
+        node.querySelector("#ob-open-mail-roots")?.addEventListener("click", () => { close(); mailRootsDialog(); });
+
+        node.querySelector("#ob-save-pc-name")?.addEventListener("click", async () => {
+          const name = node.querySelector("#ob-pc-name").value.trim();
+          const msg = node.querySelector("#ob-peer-msg");
+          try {
+            await api("/api/peers/settings", { name });
+            await poll();
+            msg.textContent = "Имя сохранено ✓";
+          } catch (err) {
+            msg.textContent = `Ошибка: ${err.message}`;
+          }
+        });
+        node.querySelector("#ob-enable-lan")?.addEventListener("click", async (e) => {
+          e.target.disabled = true;
+          await act("/api/config", { lan: true });
+          const st = node.querySelector("#ob-lan-state");
+          if (st) { st.textContent = "включён ✓"; st.className = "ok"; }
+          e.target.remove();
+          pairData = null;
+        });
+        node.querySelector("#ob-open-peers")?.addEventListener("click", () => { close(); ACTIONS.peers(); });
+        node.querySelector("#ob-dl-apk")?.addEventListener("click", () => {
+          const url = data?.update?.apk?.url || "https://github.com/purrfect0/AgentDesk/releases/latest";
+          if (typeof AD_HOST.openExternal === "function") AD_HOST.openExternal(url);
+          else window.open(url, "_blank", "noopener,noreferrer");
+        });
+        node.querySelector("#ob-quiet")?.addEventListener("click", () => { close(); notifySettingsDialog(); });
+      }
+      node.querySelector("#ob-phone-settings")?.addEventListener("click", () => { close(); ACTIONS["phone-notify"](); });
+    }, { wide: true });
+  },
   async autopilot() {
     if (!data) return;
     const isPhone = AD_HOST.kind === "mobile";
@@ -2947,6 +3198,7 @@ window.abNotifySettings = () => { if (data) notifySettingsDialog(); };
 window.abDiagnostics = () => { if (data) diagnosticsDialog(); };
 window.abUpdates = () => { if (data) ACTIONS.updates(); };
 window.abAutopilot = () => { if (data) ACTIONS.autopilot(); };
+window.abOnboarding = (step = 0) => { if (data) ACTIONS.onboarding(step); };
 
 // --- desktop app window (Electron: desktop/preload.js gives window.agentDesk) -----
 
@@ -3042,15 +3294,28 @@ $("#resize-grip").addEventListener("pointerdown", (e) => {
   });
 })();
 
+let onboardChecked = false;
+function maybeAutoOnboard() {
+  if (onboardChecked || !data) return;
+  onboardChecked = true;
+  if (!localStorage.getItem("ad.onboarded") && $("#modal-layer").classList.contains("hidden") && !location.search.includes("no-onboard")) {
+    ACTIONS.onboarding(0);
+  }
+}
+
 AD_HOST.onNotificationTap((proj, todoId) => window.abFocus(proj, todoId));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
   resyncToasts = true;
-  poll();
+  poll().then(maybeAutoOnboard);
+  const lastCheck = Date.parse(data?.update?.checked_at || "");
+  if (online && (!Number.isFinite(lastCheck) || (Date.now() - lastCheck) >= 30 * 60 * 1000)) {
+    api("/api/update/check", {}).then((u) => { if (data) { data.update = u; renderUpdateBanner(); } }).catch(() => {});
+  }
   // Back from the Android settings: show what has changed.
   if (document.querySelector("#pn-toggle")) { closeDialog(); ACTIONS["phone-notify"](); }
 });
 if (phoneNotify) startWatch(false); // also after an app update: the watcher follows the paired PC
 
-poll();
-setInterval(poll, 2000);
+poll().then(maybeAutoOnboard);
+setInterval(() => poll().then(maybeAutoOnboard), 2000);

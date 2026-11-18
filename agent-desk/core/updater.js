@@ -23,7 +23,7 @@ const DEFAULT_ALLOWED_ORIGINS = new Set([
 const MAX_JSON_BYTES = 512 * 1024;
 const MAX_SHA_BYTES = 8 * 1024;
 const MAX_EXE_BYTES = 320 * 1024 * 1024;
-const CHECK_INTERVAL_MS = 6 * 3600 * 1000;
+const CHECK_INTERVAL_MS = 30 * 60 * 1000; // every 30 minutes
 const INITIAL_DELAY_MS = 12 * 1000;
 
 function parseSemver(raw) {
@@ -143,6 +143,13 @@ class UpdateManager {
   stop() {
     if (this._initTimer) { clearTimeout(this._initTimer); this._initTimer = null; }
     if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+  }
+
+  checkIfStale(maxAgeMs = 15 * 60 * 1000) {
+    if (!this.enabled || this.desk.config.update_check === false) return;
+    if (!this._lastCheckMs || (Date.now() - this._lastCheckMs) >= maxAgeMs) {
+      this.check({ force: false }).catch(() => {});
+    }
   }
 
   _notifyUi() {
@@ -496,4 +503,4 @@ class UpdateManager {
   }
 }
 
-module.exports = { UpdateManager, parseSemver, normalizeVersion, compareSemver };
+module.exports = { UpdateManager, parseSemver, normalizeVersion, compareSemver, CHECK_INTERVAL_MS };

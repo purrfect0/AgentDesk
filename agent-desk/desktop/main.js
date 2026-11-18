@@ -128,7 +128,10 @@ function createWindow() {
     backgroundColor: "#c0c0c0", webPreferences: webPreferences(),
   });
   guard(win.webContents);
-  win.on("focus", () => win.flashFrame(false));
+  win.on("focus", () => {
+    win.flashFrame(false);
+    desk?.updater?.checkIfStale(15 * 60 * 1000);
+  });
   win.loadURL(`${base()}#native`);
   win.once("ready-to-show", () => { if (!HIDDEN) win.show(); });
   win.on("close", (e) => {
@@ -183,6 +186,11 @@ function showAutopilot() {
   win.webContents.executeJavaScript("window.abAutopilot && window.abAutopilot()").catch(() => {});
 }
 
+function showOnboarding() {
+  showMain();
+  win.webContents.executeJavaScript("window.abOnboarding && window.abOnboarding()").catch(() => {});
+}
+
 // --- tray --------------------------------------------------------------------------
 
 let lastTrayUpdateTag = "";
@@ -203,6 +211,7 @@ function rebuildTrayMenu(force = false) {
   const updLabel = upd?.available ? `Доступно обновление ${upd.latest_version}…` : "Проверить обновления…";
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "Открыть Agent Desk", click: () => showMain() },
+    { label: "Быстрый старт и настройка…", click: () => showOnboarding() },
     { label: "Автопилот и живые чаты…", click: () => showAutopilot() },
     { label: "Другие компьютеры…", click: () => showPeers() },
     { label: "Тихие часы и уведомления…", click: () => showNotifySettings() },

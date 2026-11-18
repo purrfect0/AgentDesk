@@ -57,6 +57,7 @@
     <div class="menu" data-menu>
       <span class="menu-label"><u>С</u>правка</span>
       <div class="menu-list">
+        <div class="menu-item" data-action="onboarding"><img src="icons/help_book_small-1.png" alt="">Быстрый старт и настройка…</div>
         <div class="menu-item" data-action="howto"><img src="icons/help_book_small-1.png" alt="">Инструкция для агентов…</div>
         <div class="menu-item" data-action="diagnostics"><img src="icons/msg_warning-2.png" alt="">Диагностика и отказы…</div>
         <div class="menu-item" data-action="updates"><img src="icons/world-1.png" alt="">Проверить обновления…</div>
@@ -116,7 +117,7 @@
             <thead><tr><th class="c-ico"></th><th>Агент</th><th>Состояние</th><th class="opt">Задача</th><th>Обновлено</th></tr></thead>
             <tbody></tbody>
           </table>
-          <div class="empty hidden" id="agents-empty"><img src="icons/users-0.png" alt="">Агентов пока нет. Они появятся сами после первого маркера (Справка → Инструкция для агентов).</div>
+          <div class="empty hidden" id="agents-empty"><img src="icons/users-0.png" alt=""><span>Агентов пока нет. Они появятся сами после первого маркера или подключения CLI/MCP.</span> <button type="button" data-action="onboarding">Быстрый старт…</button></div>
         </div>
         <div class="sunken-panel agents-panel hidden" id="log-view" role="tabpanel" aria-labelledby="tab-log">
           <table class="interactive" id="log-table">
